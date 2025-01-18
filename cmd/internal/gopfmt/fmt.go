@@ -21,16 +21,14 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/goplus/gop"
-
 	"github.com/goplus/gop/cmd/internal/base"
 	"github.com/goplus/gop/format"
+	"github.com/goplus/gop/tool"
 
 	goformat "go/format"
 	"go/parser"
@@ -39,14 +37,15 @@ import (
 	xformat "github.com/goplus/gop/x/format"
 )
 
-// Cmd - gop go
+// Cmd - gop fmt
 var Cmd = &base.Command{
-	UsageLine: "gop fmt [-n --smart --mvgo] path ...",
+	UsageLine: "gop fmt [flags] path ...",
 	Short:     "Format Go+ packages",
 }
 
 var (
 	flag        = &Cmd.Flag
+	flagTest    = flag.Bool("t", false, "test if Go+ files are formatted or not.")
 	flagNotExec = flag.Bool("n", false, "prints commands that would be executed.")
 	flagMoveGo  = flag.Bool("mvgo", false, "move .go files to .gop files (only available in `--smart` mode).")
 	flagSmart   = flag.Bool("smart", false, "convert Go code style into Go+ style.")
@@ -57,13 +56,14 @@ func init() {
 }
 
 var (
+	testErrCnt = 0
 	procCnt    = 0
 	walkSubDir = false
 	rootDir    = ""
 )
 
 func gopfmt(path string, class, smart, mvgo bool) (err error) {
-	src, err := ioutil.ReadFile(path)
+	src, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
@@ -94,6 +94,10 @@ func gopfmt(path string, class, smart, mvgo bool) (err error) {
 		return
 	}
 	fmt.Println(path)
+	if *flagTest {
+		testErrCnt++
+		return nil
+	}
 	if mvgo {
 		newPath := strings.TrimSuffix(path, ".go") + ".gop"
 		if err = os.WriteFile(newPath, target, 0666); err != nil {
@@ -106,7 +110,7 @@ func gopfmt(path string, class, smart, mvgo bool) (err error) {
 
 func writeFileWithBackup(path string, target []byte) (err error) {
 	dir, file := filepath.Split(path)
-	f, err := ioutil.TempFile(dir, file)
+	f, err := os.CreateTemp(dir, file)
 	if err != nil {
 		return
 	}
@@ -142,18 +146,16 @@ func (w *walker) walk(path string, d fs.DirEntry, err error) error {
 		dir, _ := filepath.Split(path)
 		fn, ok := w.dirMap[dir]
 		if !ok {
-			if mod, err := gop.LoadMod(path, nil, &gop.Config{DontUpdateGoMod: true}); err == nil {
+			if mod, err := tool.LoadMod(path); err == nil {
 				fn = func(ext string) (ok bool, class bool) {
 					switch ext {
 					case ".go", ".gop":
 						ok = true
-					case ".gopx", ".spx", ".gmx":
+					case ".gox", ".spx", ".gmx":
 						ok, class = true, true
 					default:
-						_, class = mod.IsClass(ext)
-						if class {
-							ok = true
-						}
+						class = mod.IsClass(ext)
+						ok = class
 					}
 					return
 				}
@@ -162,7 +164,7 @@ func (w *walker) walk(path string, d fs.DirEntry, err error) error {
 					switch ext {
 					case ".go", ".gop":
 						ok = true
-					case ".gopx", ".spx", ".gmx":
+					case ".gox", ".spx", ".gmx":
 						ok, class = true, true
 					}
 					return
@@ -201,6 +203,14 @@ func runCmd(cmd *base.Command, args []string) {
 	narg := flag.NArg()
 	if narg < 1 {
 		cmd.Usage(os.Stderr)
+	}
+	if *flagTest {
+		defer func() {
+			if testErrCnt > 0 {
+				fmt.Printf("total %d files are not formatted.\n", testErrCnt)
+				os.Exit(1)
+			}
+		}()
 	}
 	walker := newWalker()
 	for i := 0; i < narg; i++ {

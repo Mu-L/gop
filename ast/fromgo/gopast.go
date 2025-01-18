@@ -211,7 +211,17 @@ func gopIdent(v *ast.Ident) *gopast.Ident {
 	return &gopast.Ident{
 		NamePos: v.NamePos,
 		Name:    v.Name,
+		Obj:     &gopast.Object{Data: v},
 	}
+}
+
+// CheckIdent checks if a Go+ ast.Ident is converted from a Go ast.Ident or not.
+// If it is, CheckIdent returns the original Go ast.Ident object.
+func CheckIdent(v *gopast.Ident) (id *ast.Ident, ok bool) {
+	if o := v.Obj; o != nil && o.Kind == 0 && o.Data != nil {
+		id, ok = o.Data.(*ast.Ident)
+	}
+	return
 }
 
 func gopIdents(names []*ast.Ident) []*gopast.Ident {
@@ -245,6 +255,7 @@ func gopFieldList(v *ast.FieldList) *gopast.FieldList {
 
 func gopFuncDecl(v *ast.FuncDecl) *gopast.FuncDecl {
 	return &gopast.FuncDecl{
+		Doc:  v.Doc,
 		Recv: gopFieldList(v.Recv),
 		Name: gopIdent(v.Name),
 		Type: gopFuncType(v.Type),
@@ -294,6 +305,7 @@ func gopGenDecl(v *ast.GenDecl) *gopast.GenDecl {
 		}
 	}
 	return &gopast.GenDecl{
+		Doc:    v.Doc,
 		TokPos: v.TokPos,
 		Tok:    goptoken.Token(v.Tok),
 		Lparen: v.Lparen,
@@ -330,6 +342,7 @@ const (
 	KeepCgo
 )
 
+// ASTFile converts a Go ast.File into a Go+ ast.File object.
 func ASTFile(f *ast.File, mode int) *gopast.File {
 	if (mode & KeepFuncBody) != 0 {
 		log.Panicln("ASTFile: doesn't support keeping func body now")
@@ -338,6 +351,7 @@ func ASTFile(f *ast.File, mode int) *gopast.File {
 		log.Panicln("ASTFile: doesn't support keeping cgo now")
 	}
 	return &gopast.File{
+		Doc:     f.Doc,
 		Package: f.Package,
 		Name:    gopIdent(f.Name),
 		Decls:   gopDecls(f.Decls),

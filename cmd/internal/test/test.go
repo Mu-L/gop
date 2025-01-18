@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Package test implements the ``gop test'' command.
+// Package test implements the “gop test” command.
 package test
 
 import (
@@ -22,15 +22,13 @@ import (
 	"log"
 	"os"
 	"reflect"
-	"syscall"
 
-	"github.com/goplus/gop"
+	"github.com/goplus/gogen"
 	"github.com/goplus/gop/cl"
 	"github.com/goplus/gop/cmd/internal/base"
+	"github.com/goplus/gop/tool"
 	"github.com/goplus/gop/x/gocmd"
-	"github.com/goplus/gop/x/gopenv"
 	"github.com/goplus/gop/x/gopprojs"
-	"github.com/goplus/gox"
 )
 
 // gop test
@@ -66,36 +64,41 @@ func runCmd(cmd *base.Command, args []string) {
 	}
 
 	if *flagDebug {
-		gox.SetDebug(gox.DbgFlagAll &^ gox.DbgFlagComments)
+		gogen.SetDebug(gogen.DbgFlagAll &^ gogen.DbgFlagComments)
 		cl.SetDebug(cl.DbgFlagAll)
 		cl.SetDisableRecover(true)
 	}
 
-	gopEnv := gopenv.Get()
-	conf := &gop.Config{Gop: gopEnv}
-	confCmd := &gocmd.Config{Gop: gopEnv}
+	conf, err := tool.NewDefaultConf(".", 0, pass.Tags())
+	if err != nil {
+		log.Panicln("tool.NewDefaultConf:", err)
+	}
+	defer conf.UpdateCache()
+
+	confCmd := conf.NewGoCmdConf()
 	confCmd.Flags = pass.Args
 	for _, proj := range projs {
 		test(proj, conf, confCmd)
 	}
 }
 
-func test(proj gopprojs.Proj, conf *gop.Config, test *gocmd.TestConfig) {
+func test(proj gopprojs.Proj, conf *tool.Config, test *gocmd.TestConfig) {
+	const flags = tool.GenFlagPrompt
 	var obj string
 	var err error
 	switch v := proj.(type) {
 	case *gopprojs.DirProj:
 		obj = v.Dir
-		err = gop.TestDir(obj, conf, test)
+		err = tool.TestDir(obj, conf, test, flags)
 	case *gopprojs.PkgPathProj:
 		obj = v.Path
-		err = gop.TestPkgPath("", v.Path, conf, test)
+		err = tool.TestPkgPath("", v.Path, conf, test, flags)
 	case *gopprojs.FilesProj:
-		err = gop.TestFiles(v.Files, conf, test)
+		err = tool.TestFiles(v.Files, conf, test)
 	default:
 		log.Panicln("`gop test` doesn't support", reflect.TypeOf(v))
 	}
-	if err == syscall.ENOENT {
+	if tool.NotFound(err) {
 		fmt.Fprintf(os.Stderr, "gop test %v: not found\n", obj)
 	} else if err != nil {
 		fmt.Fprintln(os.Stderr, err)

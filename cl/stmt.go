@@ -21,39 +21,89 @@ import (
 	"go/constant"
 	"log"
 	"path/filepath"
-	"reflect"
 
 	goast "go/ast"
 	gotoken "go/token"
 	"go/types"
 
+	"github.com/goplus/gogen"
 	"github.com/goplus/gop/ast"
 	"github.com/goplus/gop/token"
-	"github.com/goplus/gox"
 )
 
-func relFile(dir string, file string) string {
-	if rel, err := filepath.Rel(dir, file); err == nil {
-		if rel[0] == '.' {
-			return rel
-		}
-		return "./" + rel
+func fileLineFile(relBaseDir, absFile string) string {
+	if ret, err := filepath.Rel(relBaseDir, absFile); err == nil {
+		return filepath.ToSlash(ret)
 	}
-	return file
+	return absFile
+}
+
+func relFile(dir string, absFile string) string {
+	if dir != "" {
+		return fileLineFile(dir, absFile)
+	}
+	return absFile
 }
 
 func commentStmt(ctx *blockCtx, stmt ast.Stmt) {
 	if ctx.fileLine {
-		start := stmt.Pos()
+		commentStmtEx(ctx.cb, ctx.pkgCtx, stmt)
+	}
+}
+
+func commentStmtEx(cb *gogen.CodeBuilder, ctx *pkgCtx, stmt ast.Stmt) {
+	start := stmt.Pos()
+	if start == token.NoPos {
+		cb.SetComments(nil, false)
+		return
+	}
+	if doc := checkStmtDoc(stmt); doc != nil {
+		start = doc.Pos()
+	}
+	pos := ctx.fset.Position(start)
+	if ctx.relBaseDir != "" {
+		pos.Filename = fileLineFile(ctx.relBaseDir, pos.Filename)
+	}
+	line := fmt.Sprintf("\n//line %s:%d:1", pos.Filename, pos.Line)
+	comments := &goast.CommentGroup{
+		List: []*goast.Comment{{Text: line}},
+	}
+	cb.SetComments(comments, false)
+}
+
+func checkStmtDoc(stmt ast.Stmt) *ast.CommentGroup {
+	if decl, ok := stmt.(*ast.DeclStmt); ok {
+		if d, ok := decl.Decl.(*ast.GenDecl); ok {
+			return d.Doc
+		}
+	}
+	return nil
+}
+
+func commentFunc(ctx *blockCtx, fn *gogen.Func, decl *ast.FuncDecl) {
+	start := decl.Name.Pos()
+	if ctx.fileLine && start != token.NoPos {
+		if decl.Doc != nil {
+			start = decl.Doc.Pos()
+		}
 		pos := ctx.fset.Position(start)
-		if ctx.relativePath {
-			pos.Filename = relFile(ctx.targetDir, pos.Filename)
+		if ctx.relBaseDir != "" {
+			pos.Filename = fileLineFile(ctx.relBaseDir, pos.Filename)
 		}
-		line := fmt.Sprintf("\n//line %s:%d", pos.Filename, pos.Line)
-		comments := &goast.CommentGroup{
-			List: []*goast.Comment{{Text: line}},
+		var line string
+		if decl.Shadow {
+			line = fmt.Sprintf("//line %s:%d", pos.Filename, pos.Line)
+		} else {
+			line = fmt.Sprintf("//line %s:%d:1", pos.Filename, pos.Line)
 		}
-		ctx.cb.SetComments(comments, false)
+		doc := &goast.CommentGroup{}
+		doc.List = append(doc.List, &goast.Comment{Text: line})
+		if decl.Doc != nil {
+			doc.List = append(doc.List, decl.Doc.List...)
+		}
+		fn.SetComments(ctx.pkg, doc)
+	} else if decl.Doc != nil {
+		fn.SetComments(ctx.pkg, decl.Doc)
 	}
 }
 
@@ -73,7 +123,7 @@ func compileStmt(ctx *blockCtx, stmt ast.Stmt) {
 	if enableRecover {
 		defer func() {
 			if e := recover(); e != nil {
-				ctx.handleRecover(e)
+				ctx.handleRecover(e, stmt)
 				ctx.cb.ResetStmt()
 			}
 		}()
@@ -81,14 +131,9 @@ func compileStmt(ctx *blockCtx, stmt ast.Stmt) {
 	commentStmt(ctx, stmt)
 	switch v := stmt.(type) {
 	case *ast.ExprStmt:
-		inFlags := 0
-		if isCommandWithoutArgs(v.X) {
-			inFlags = clCommandWithoutArgs
-		}
-		compileExpr(ctx, v.X, inFlags)
-		if inFlags != 0 && gox.IsFunc(ctx.cb.InternalStack().Get(-1).Type) {
-			ctx.cb.Call(0)
-		}
+		x := v.X
+		inFlags := checkCommandWithoutArgs(x)
+		compileExpr(ctx, x, inFlags)
 	case *ast.AssignStmt:
 		compileAssignStmt(ctx, v)
 	case *ast.ReturnStmt:
@@ -122,6 +167,9 @@ func compileStmt(ctx *blockCtx, stmt ast.Stmt) {
 	case *ast.BlockStmt:
 		ctx.cb.Block()
 		compileStmts(ctx, v.List)
+		if rec := ctx.recorder(); rec != nil {
+			rec.Scope(v, ctx.cb.Scope())
+		}
 		ctx.cb.End()
 		return
 	case *ast.SelectStmt:
@@ -129,21 +177,21 @@ func compileStmt(ctx *blockCtx, stmt ast.Stmt) {
 	case *ast.EmptyStmt:
 		// do nothing
 	default:
-		log.Panicln("TODO - compileStmt failed: unknown -", reflect.TypeOf(v))
+		log.Panicf("compileStmt failed: unknown - %T\n", v)
 	}
 	ctx.cb.EndStmt()
 }
 
-func isCommandWithoutArgs(x ast.Expr) bool {
+func checkCommandWithoutArgs(x ast.Expr) int {
 retry:
-	switch t := x.(type) {
-	case *ast.Ident:
-		return true
-	case *ast.SelectorExpr:
-		x = t.X
+	if v, ok := x.(*ast.SelectorExpr); ok {
+		x = v.X
 		goto retry
 	}
-	return false
+	if _, ok := x.(*ast.Ident); ok {
+		return clCommandWithoutArgs
+	}
+	return 0
 }
 
 func compileReturnStmt(ctx *blockCtx, expr *ast.ReturnStmt) {
@@ -179,6 +227,9 @@ func compileReturnStmt(ctx *blockCtx, expr *ast.ReturnStmt) {
 						ret.Pos(), "cannot use lambda expression as type %v in return statement", rtyp))
 				}
 				compileLambda(ctx, v, sig)
+			case *ast.SliceLit:
+				rtyp := ctx.cb.Func().Type().(*types.Signature).Results().At(i).Type()
+				compileSliceLit(ctx, v, rtyp)
 			default:
 				compileExpr(ctx, ret, inFlags)
 			}
@@ -210,8 +261,20 @@ func compileAssignStmt(ctx *blockCtx, expr *ast.AssignStmt) {
 			if v, ok := lhs.(*ast.Ident); ok {
 				names[i] = v.Name
 			} else {
+				compileExprLHS(ctx, lhs) // only for typesutil.Check
 				log.Panicln("TODO: non-name $v on left side of :=")
 			}
+		}
+		if rec := ctx.recorder(); rec != nil {
+			newNames := make([]*ast.Ident, 0, len(names))
+			scope := ctx.cb.Scope()
+			for _, lhs := range expr.Lhs {
+				v := lhs.(*ast.Ident)
+				if scope.Lookup(v.Name) == nil {
+					newNames = append(newNames, v)
+				}
+			}
+			defer defNames(ctx, newNames, scope)
 		}
 		ctx.cb.DefineVarStart(expr.Pos(), names...)
 		if enableRecover {
@@ -231,16 +294,31 @@ func compileAssignStmt(ctx *blockCtx, expr *ast.AssignStmt) {
 	for _, lhs := range expr.Lhs {
 		compileExprLHS(ctx, lhs)
 	}
-	for _, rhs := range expr.Rhs {
-		switch e := rhs.(type) {
+	for i, rhs := range expr.Rhs {
+		switch e := unparen(rhs).(type) {
 		case *ast.LambdaExpr, *ast.LambdaExpr2:
 			if len(expr.Lhs) == 1 && len(expr.Rhs) == 1 {
 				typ := ctx.cb.Get(-1).Type.(interface{ Elem() types.Type }).Elem()
-				sig := checkLambdaFuncType(ctx, e, typ, clLambaAssign, expr.Lhs[0])
+				sig, err := checkLambdaFuncType(ctx, e, typ, clLambaAssign, expr.Lhs[0])
+				if err != nil {
+					panic(err)
+				}
 				compileLambda(ctx, e, sig)
 			} else {
 				panic(ctx.newCodeErrorf(e.Pos(), "lambda unsupport multiple assignment"))
 			}
+		case *ast.SliceLit:
+			var typ types.Type
+			if len(expr.Lhs) == len(expr.Rhs) {
+				typ, _ = gogen.DerefType(ctx.cb.Get(-1 - i).Type)
+			}
+			compileSliceLit(ctx, e, typ)
+		case *ast.CompositeLit:
+			var typ types.Type
+			if len(expr.Lhs) == len(expr.Rhs) {
+				typ, _ = gogen.DerefType(ctx.cb.Get(-1 - i).Type)
+			}
+			compileCompositeLit(ctx, e, typ, false)
 		default:
 			compileExpr(ctx, rhs, inFlags)
 		}
@@ -256,10 +334,14 @@ func compileAssignStmt(ctx *blockCtx, expr *ast.AssignStmt) {
 }
 
 // forRange(names...) x rangeAssignThen
-//    body
+//
+//	body
+//
 // end
 // forRange k v x rangeAssignThen
-//    body
+//
+//	body
+//
 // end
 func compileRangeStmt(ctx *blockCtx, v *ast.RangeStmt) {
 	if re, ok := v.X.(*ast.RangeExpr); ok {
@@ -272,20 +354,25 @@ func compileRangeStmt(ctx *blockCtx, v *ast.RangeStmt) {
 	}
 	cb := ctx.cb
 	comments, once := cb.BackupComments()
+	defineNames := make([]*ast.Ident, 0, 2)
 	if v.Tok == token.DEFINE {
 		names := make([]string, 1, 2)
 		if v.Key == nil {
 			names[0] = "_"
 		} else {
-			names[0] = v.Key.(*ast.Ident).Name
+			key := v.Key.(*ast.Ident)
+			names[0] = key.Name
+			defineNames = append(defineNames, key)
 		}
 		if v.Value != nil {
-			names = append(names, v.Value.(*ast.Ident).Name)
+			value := v.Value.(*ast.Ident)
+			names = append(names, value.Name)
+			defineNames = append(defineNames, value)
 		}
-		cb.ForRange(names...)
+		cb.ForRangeEx(names, v)
 		compileExpr(ctx, v.X)
 	} else {
-		cb.ForRange()
+		cb.ForRangeEx(nil, v)
 		n := 0
 		if v.Key == nil {
 			if v.Value != nil {
@@ -307,10 +394,21 @@ func compileRangeStmt(ctx *blockCtx, v *ast.RangeStmt) {
 		pos = v.For
 	}
 	cb.RangeAssignThen(pos)
+	if len(defineNames) > 0 {
+		defNames(ctx, defineNames, cb.Scope())
+	}
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v, cb.Scope())
+	}
+	cb.VBlock()
 	compileStmts(ctx, v.Body.List)
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v.Body, cb.Scope())
+	}
+	cb.End(v.Body)
 	cb.SetComments(comments, once)
 	setBodyHandler(ctx)
-	cb.End()
+	cb.End(v)
 }
 
 func compileForPhraseStmt(ctx *blockCtx, v *ast.ForPhraseStmt) {
@@ -321,26 +419,43 @@ func compileForPhraseStmt(ctx *blockCtx, v *ast.ForPhraseStmt) {
 	cb := ctx.cb
 	comments, once := cb.BackupComments()
 	names := make([]string, 1, 2)
+	defineNames := make([]*ast.Ident, 0, 2)
 	if v.Key == nil {
 		names[0] = "_"
 	} else {
 		names[0] = v.Key.Name
+		defineNames = append(defineNames, v.Key)
 	}
 	if v.Value != nil {
 		names = append(names, v.Value.Name)
+		defineNames = append(defineNames, v.Value)
 	}
 	cb.ForRange(names...)
 	compileExpr(ctx, v.X)
 	cb.RangeAssignThen(v.TokPos)
+	if len(defineNames) > 0 {
+		defNames(ctx, defineNames, cb.Scope())
+	}
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v, cb.Scope())
+	}
 	if v.Cond != nil {
 		cb.If()
 		compileExpr(ctx, v.Cond)
 		cb.Then()
 		compileStmts(ctx, v.Body.List)
 		cb.SetComments(comments, once)
+		if rec := ctx.recorder(); rec != nil {
+			rec.Scope(v.Body, cb.Scope())
+		}
 		cb.End()
 	} else {
+		cb.VBlock()
 		compileStmts(ctx, v.Body.List)
+		if rec := ctx.recorder(); rec != nil {
+			rec.Scope(v.Body, cb.Scope())
+		}
+		cb.End(v.Body)
 		cb.SetComments(comments, once)
 	}
 	setBodyHandler(ctx)
@@ -436,13 +551,18 @@ func toForStmt(forPos token.Pos, value ast.Expr, body *ast.BlockStmt, re *ast.Ra
 }
 
 // for init; cond then
-//    body
-//    post
+//
+//	body
+//	post
+//
 // end
 func compileForStmt(ctx *blockCtx, v *ast.ForStmt) {
 	cb := ctx.cb
 	comments, once := cb.BackupComments()
-	cb.For()
+	cb.For(v)
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v, cb.Scope())
+	}
 	if v.Init != nil {
 		compileStmt(ctx, v.Init)
 	}
@@ -451,7 +571,10 @@ func compileForStmt(ctx *blockCtx, v *ast.ForStmt) {
 	} else {
 		cb.None()
 	}
-	cb.Then()
+	cb.Then(v.Body)
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v.Body, cb.Scope())
+	}
 	compileStmts(ctx, v.Body.List)
 	if v.Post != nil {
 		cb.Post()
@@ -459,24 +582,29 @@ func compileForStmt(ctx *blockCtx, v *ast.ForStmt) {
 	}
 	cb.SetComments(comments, once)
 	setBodyHandler(ctx)
-	cb.End()
+	cb.End(v)
 }
 
 // if init; cond then
-//    body
+//
+//	body
+//
 // end
 func compileIfStmt(ctx *blockCtx, v *ast.IfStmt) {
 	cb := ctx.cb
 	comments, once := cb.BackupComments()
-	cb.If()
+	cb.If(v)
 	if v.Init != nil {
 		compileStmt(ctx, v.Init)
 	}
 	compileExpr(ctx, v.Cond)
-	cb.Then()
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v, cb.Scope())
+	}
+	cb.Then(v.Body)
 	compileStmts(ctx, v.Body.List)
 	if e := v.Else; e != nil {
-		cb.Else()
+		cb.Else(e)
 		if stmts, ok := e.(*ast.BlockStmt); ok {
 			compileStmts(ctx, stmts.List)
 		} else {
@@ -484,16 +612,23 @@ func compileIfStmt(ctx *blockCtx, v *ast.IfStmt) {
 		}
 	}
 	cb.SetComments(comments, once)
-	cb.End()
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v.Body, cb.Scope())
+	}
+	cb.End(v)
 }
 
 // typeSwitch(name) init; expr typeAssertThen()
 // type1 type2 ... typeN typeCase(N)
-//    ...
-//    end
+//
+//	...
+//	end
+//
 // type1 type2 ... typeM typeCase(M)
-//    ...
-//    end
+//
+//	...
+//	end
+//
 // end
 func compileTypeSwitchStmt(ctx *blockCtx, v *ast.TypeSwitchStmt) {
 	var cb = ctx.cb
@@ -513,7 +648,10 @@ func compileTypeSwitchStmt(ctx *blockCtx, v *ast.TypeSwitchStmt) {
 	if ta.Type != nil {
 		panic("TODO: type switch syntax error, please use x.(type)")
 	}
-	cb.TypeSwitch(name)
+	cb.TypeSwitch(name, v)
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v, cb.Scope())
+	}
 	if v.Init != nil {
 		compileStmt(ctx, v.Init)
 	}
@@ -526,21 +664,26 @@ func compileTypeSwitchStmt(ctx *blockCtx, v *ast.TypeSwitchStmt) {
 		if !ok {
 			log.Panicln("TODO: compile TypeSwitchStmt failed - case clause expected.")
 		}
+		cb.TypeCase(c)
 		for _, citem := range c.List {
 			compileExpr(ctx, citem)
 			T := cb.Get(-1).Type
-			if tt, ok := T.(*gox.TypeType); ok {
+			if tt, ok := T.(*gogen.TypeType); ok {
 				T = tt.Type()
 			}
 			var haserr bool
 			for t, other := range seen {
 				if T == nil && t == nil || T != nil && t != nil && types.Identical(T, t) {
 					haserr = true
-					pos := ctx.Position(citem.Pos())
+					pos := citem.Pos()
 					if T == types.Typ[types.UntypedNil] {
-						ctx.handleCodeErrorf(&pos, "multiple nil cases in type switch (first at %v)", ctx.Position(other.Pos()))
+						ctx.handleErrorf(
+							pos, "multiple nil cases in type switch (first at %v)",
+							ctx.Position(other.Pos()))
 					} else {
-						ctx.handleCodeErrorf(&pos, "duplicate case %s in type switch\n\tprevious case at %v", T, ctx.Position(other.Pos()))
+						ctx.handleErrorf(
+							pos, "duplicate case %s in type switch\n\tprevious case at %v",
+							T, ctx.Position(other.Pos()))
 					}
 				}
 			}
@@ -550,33 +693,40 @@ func compileTypeSwitchStmt(ctx *blockCtx, v *ast.TypeSwitchStmt) {
 		}
 		if c.List == nil {
 			if firstDefault != nil {
-				pos := ctx.Position(c.Pos())
-				ctx.handleCodeErrorf(&pos, "multiple defaults in type switch (first at %v)", ctx.Position(firstDefault.Pos()))
+				ctx.handleErrorf(
+					c.Pos(), "multiple defaults in type switch (first at %v)", ctx.Position(firstDefault.Pos()))
 			} else {
 				firstDefault = c
 			}
 		}
-		cb.TypeCase(len(c.List)) // TypeCase(0) means default case
+		cb.Then()
 		compileStmts(ctx, c.Body)
 		commentStmt(ctx, stmt)
-		cb.End()
+		if rec := ctx.recorder(); rec != nil {
+			rec.Scope(c, cb.Scope())
+		}
+		cb.End(c)
 	}
 	cb.SetComments(comments, once)
-	cb.End()
+	cb.End(v)
 }
 
 // switch init; tag then
 // expr1 expr2 ... exprN case(N)
-//    ...
-//    end
+//
+//	...
+//	end
+//
 // expr1 expr2 ... exprM case(M)
-//    ...
-//    end
+//
+//	...
+//	end
+//
 // end
 func compileSwitchStmt(ctx *blockCtx, v *ast.SwitchStmt) {
 	cb := ctx.cb
 	comments, once := cb.BackupComments()
-	cb.Switch()
+	cb.Switch(v)
 	if v.Init != nil {
 		compileStmt(ctx, v.Init)
 	}
@@ -585,7 +735,10 @@ func compileSwitchStmt(ctx *blockCtx, v *ast.SwitchStmt) {
 	} else {
 		cb.None() // switch {...}
 	}
-	cb.Then()
+	if rec := ctx.recorder(); rec != nil {
+		rec.Scope(v, cb.Scope())
+	}
+	cb.Then(v.Body)
 	seen := make(valueMap)
 	var firstDefault ast.Stmt
 	for _, stmt := range v.Body.List {
@@ -593,6 +746,7 @@ func compileSwitchStmt(ctx *blockCtx, v *ast.SwitchStmt) {
 		if !ok {
 			log.Panicln("TODO: compile SwitchStmt failed - case clause expected.")
 		}
+		cb.Case(c)
 		for _, citem := range c.List {
 			compileExpr(ctx, citem)
 			v := cb.Get(-1)
@@ -604,12 +758,12 @@ func compileSwitchStmt(ctx *blockCtx, v *ast.SwitchStmt) {
 				for _, vt := range seen[val] {
 					if types.Identical(typ, vt.typ) {
 						haserr = true
-						src, pos := ctx.LoadExpr(v.Src)
-						if _, ok := v.Src.(*ast.BasicLit); ok {
-							ctx.handleCodeErrorf(&pos, "duplicate case %s in switch\n\tprevious case at %v",
+						src := ctx.LoadExpr(v.Src)
+						if lit, ok := v.Src.(*ast.BasicLit); ok {
+							ctx.handleErrorf(lit.Pos(), "duplicate case %s in switch\n\tprevious case at %v",
 								src, ctx.Position(vt.pos))
 						} else {
-							ctx.handleCodeErrorf(&pos, "duplicate case %s (value %#v) in switch\n\tprevious case at %v",
+							ctx.handleErrorf(v.Src.Pos(), "duplicate case %s (value %#v) in switch\n\tprevious case at %v",
 								src, val, ctx.Position(vt.pos))
 						}
 					}
@@ -621,23 +775,25 @@ func compileSwitchStmt(ctx *blockCtx, v *ast.SwitchStmt) {
 		}
 		if c.List == nil {
 			if firstDefault != nil {
-				pos := ctx.Position(c.Pos())
-				ctx.handleCodeErrorf(&pos, "multiple defaults in switch (first at %v)", ctx.Position(firstDefault.Pos()))
+				ctx.handleErrorf(c.Pos(), "multiple defaults in switch (first at %v)", ctx.Position(firstDefault.Pos()))
 			} else {
 				firstDefault = c
 			}
 		}
-		cb.Case(len(c.List)) // Case(0) means default case
+		cb.Then()
 		body, has := hasFallthrough(c.Body)
 		compileStmts(ctx, body)
 		if has {
 			cb.Fallthrough()
 		}
 		commentStmt(ctx, stmt)
-		cb.End()
+		if rec := ctx.recorder(); rec != nil {
+			rec.Scope(c, cb.Scope())
+		}
+		cb.End(c)
 	}
 	cb.SetComments(comments, once)
-	cb.End()
+	cb.End(v)
 }
 
 func hasFallthrough(body []ast.Stmt) ([]ast.Stmt, bool) {
@@ -651,37 +807,45 @@ func hasFallthrough(body []ast.Stmt) ([]ast.Stmt, bool) {
 
 // select
 // stmt1 commCase(1)
-//    ...
-//    end
+//
+//	...
+//	end
+//
 // stmt2 commCase(1)
-//    ...
-//    end
+//
+//	...
+//	end
+//
 // ...
 // commCase(0)
-//    ...
-//    end
+//
+//	...
+//	end
+//
 // end
 func compileSelectStmt(ctx *blockCtx, v *ast.SelectStmt) {
 	cb := ctx.cb
 	comments, once := cb.BackupComments()
-	cb.Select()
+	cb.Select(v)
 	for _, stmt := range v.Body.List {
 		c, ok := stmt.(*ast.CommClause)
 		if !ok {
 			log.Panicln("TODO: compile SelectStmt failed - comm clause expected.")
 		}
-		var n int
+		cb.CommCase(c)
 		if c.Comm != nil {
 			compileStmt(ctx, c.Comm)
-			n = 1
 		}
-		cb.CommCase(n) // CommCase(0) means default case
+		cb.Then()
 		compileStmts(ctx, c.Body)
 		commentStmt(ctx, stmt)
-		cb.End()
+		if rec := ctx.recorder(); rec != nil {
+			rec.Scope(c, cb.Scope())
+		}
+		cb.End(c)
 	}
 	cb.SetComments(comments, once)
-	cb.End()
+	cb.End(v)
 }
 
 func compileBranchStmt(ctx *blockCtx, v *ast.BranchStmt) {
@@ -702,20 +866,18 @@ func compileBranchStmt(ctx *blockCtx, v *ast.BranchStmt) {
 	case token.CONTINUE:
 		ctx.cb.Continue(getLabel(ctx, label))
 	case token.FALLTHROUGH:
-		pos := ctx.Position(v.Pos())
-		ctx.handleCodeErrorf(&pos, "fallthrough statement out of place")
+		ctx.handleErrorf(v.Pos(), "fallthrough statement out of place")
 	default:
 		panic("unknown branch statement")
 	}
 }
 
-func getLabel(ctx *blockCtx, label *ast.Ident) *gox.Label {
+func getLabel(ctx *blockCtx, label *ast.Ident) *gogen.Label {
 	if label != nil {
 		if l, ok := ctx.cb.LookupLabel(label.Name); ok {
 			return l
 		}
-		pos := ctx.Position(label.Pos())
-		ctx.handleCodeErrorf(&pos, "label %v is not defined", label.Name)
+		ctx.handleErrorf(label.Pos(), "label %v is not defined", label.Name)
 	}
 	return nil
 }
@@ -745,12 +907,12 @@ func compileDeclStmt(ctx *blockCtx, expr *ast.DeclStmt) {
 				compileType(ctx, spec.(*ast.TypeSpec))
 			}
 		case token.CONST:
-			cdecl := ctx.pkg.NewConstDecl(ctx.cb.Scope())
+			cdecl := ctx.pkg.NewConstDefs(ctx.cb.Scope())
 			loadConstSpecs(ctx, cdecl, d.Specs)
 		case token.VAR:
 			for _, spec := range d.Specs {
 				v := spec.(*ast.ValueSpec)
-				loadVars(ctx, v, false)
+				loadVars(ctx, v, d.Doc, false)
 			}
 		default:
 			log.Panicln("TODO: compileDeclStmt - unknown")

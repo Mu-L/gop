@@ -17,7 +17,6 @@
 // Package scanner implements a scanner for Go+ source text.
 // It takes a []byte as source which can then be tokenized
 // through repeated calls to the Scan method.
-//
 package scanner
 
 import (
@@ -36,13 +35,11 @@ import (
 // encountered and a handler was installed, the handler is called with a
 // position and an error message. The position points to the beginning of
 // the offending token.
-//
 type ErrorHandler = scanner.ErrorHandler
 
 // A Scanner holds the scanner's internal state while processing
 // a given text. It can be allocated as part of another data
 // structure but must be initialized via Init before use.
-//
 type Scanner struct {
 	// immutable state
 	file *token.File  // source file handle
@@ -56,7 +53,9 @@ type Scanner struct {
 	offset     int  // character offset
 	rdOffset   int  // reading offset (position after current character)
 	lineOffset int  // current line offset
+	nParen     int
 	insertSemi bool // insert a semicolon before next newline
+	needUnit   bool
 
 	// public state - ok to modify
 	ErrorCount int // number of errors encountered
@@ -66,7 +65,6 @@ const bom = 0xFEFF // byte order mark, only permitted as very first character
 
 // Read the next Unicode char into s.ch.
 // s.ch < 0 means end-of-file.
-//
 func (s *Scanner) next() {
 	if s.rdOffset < len(s.src) {
 		s.offset = s.rdOffset
@@ -110,7 +108,6 @@ func (s *Scanner) peek() byte {
 
 // A Mode value is a set of flags (or 0).
 // They control scanner behavior.
-//
 type Mode uint
 
 const (
@@ -133,12 +130,16 @@ const (
 //
 // Note that Init may call err if there is an error in the first character
 // of the file.
-//
 func (s *Scanner) Init(file *token.File, src []byte, err ErrorHandler, mode Mode) {
 	// Explicitly initialize all fields since a scanner may be reused.
 	if file.Size() != len(src) {
 		panic(fmt.Sprintf("file size (%d) does not match src len (%d)", file.Size(), len(src)))
 	}
+	s.InitEx(file, src, 0, err, mode)
+}
+
+// InitEx init the scanner with an offset (this means src[offset:] is all the code to scan).
+func (s *Scanner) InitEx(file *token.File, src []byte, offset int, err ErrorHandler, mode Mode) {
 	s.file = file
 	s.dir, _ = filepath.Split(file.Name())
 	s.src = src
@@ -147,7 +148,7 @@ func (s *Scanner) Init(file *token.File, src []byte, err ErrorHandler, mode Mode
 
 	s.ch = ' '
 	s.offset = 0
-	s.rdOffset = 0
+	s.rdOffset = offset
 	s.lineOffset = 0
 	s.insertSemi = false
 	s.ErrorCount = 0
@@ -156,6 +157,10 @@ func (s *Scanner) Init(file *token.File, src []byte, err ErrorHandler, mode Mode
 	if s.ch == bom {
 		s.next() // ignore BOM at file beginning
 	}
+}
+
+func (s *Scanner) CodeTo(end int) []byte {
+	return s.src[:end]
 }
 
 func (s *Scanner) error(offs int, msg string) {
@@ -505,6 +510,8 @@ func (s *Scanner) scanNumber() (token.Token, string) {
 	} else if s.ch == 'r' {
 		tok = token.RAT
 		s.next()
+	} else if isLetter(s.ch) {
+		s.needUnit = true
 	}
 
 	lit := string(s.src[offs:s.offset])
@@ -780,6 +787,11 @@ func (s *Scanner) switch4(tok0, tok1 token.Token, ch2 rune, tok2, tok3 token.Tok
 	return tok0
 }
 
+func (s *Scanner) tokSEMICOLON() token.Token {
+	s.nParen = 0
+	return token.SEMICOLON
+}
+
 // Scan scans the next token and returns the token position, the token,
 // and its literal string if applicable. The source end is indicated by
 // token.EOF.
@@ -810,7 +822,6 @@ func (s *Scanner) switch4(tok0, tok1 token.Token, ch2 rune, tok2, tok3 token.Tok
 // Scan adds line information to the file added to the file
 // set with Init. Token positions are relative to that file
 // and thus relative to the file set.
-//
 func (s *Scanner) Scan() (pos token.Pos, tok token.Token, lit string) {
 scanAgain:
 	s.skipWhitespace()
@@ -820,6 +831,12 @@ scanAgain:
 
 	// determine token value
 	insertSemi := false
+	if s.needUnit { // number with unit
+		insertSemi = true
+		tok, lit = token.UNIT, s.scanIdentifier()
+		s.needUnit = false
+		goto done
+	}
 	switch ch := s.ch; {
 	case isLetter(ch):
 		lit = s.scanIdentifier()
@@ -827,10 +844,17 @@ scanAgain:
 			// keywords are longer than one letter - avoid lookup otherwise
 			tok = token.Lookup(lit)
 			switch tok {
-			case token.IDENT, token.BREAK, token.CONTINUE, token.FALLTHROUGH, token.RETURN:
+			case token.IDENT:
+				insertSemi = true
+				if lit == "py" && s.ch == '"' { // py"..."
+					s.next()
+					tok = token.PYSTRING
+					lit = s.scanString()
+				}
+			case token.BREAK, token.CONTINUE, token.FALLTHROUGH, token.RETURN:
 				insertSemi = true
 			}
-		} else if lit == "C" && s.ch == '"' { // C"..."
+		} else if (lit == "c" || lit == "C") && s.ch == '"' { // c"..."
 			s.next()
 			insertSemi = true
 			tok = token.CSTRING
@@ -848,7 +872,7 @@ scanAgain:
 		case -1:
 			if s.insertSemi {
 				s.insertSemi = false // EOF consumed
-				return pos, token.SEMICOLON, "\n"
+				return pos, s.tokSEMICOLON(), "\n"
 			}
 			tok = token.EOF
 		case '\n':
@@ -856,7 +880,7 @@ scanAgain:
 			// set in the first place and exited early
 			// from s.skipWhitespace()
 			s.insertSemi = false // newline consumed
-			return pos, token.SEMICOLON, "\n"
+			return pos, s.tokSEMICOLON(), "\n"
 		case '"':
 			insertSemi = true
 			tok = token.STRING
@@ -877,16 +901,21 @@ scanAgain:
 			if s.ch == '.' && s.peek() == '.' {
 				s.next()
 				s.next() // consume last '.'
+				if s.nParen == 0 {
+					insertSemi = true
+				}
 				tok = token.ELLIPSIS
 			}
 		case ',':
 			tok = token.COMMA
 		case ';':
-			tok = token.SEMICOLON
+			tok = s.tokSEMICOLON()
 			lit = ";"
 		case '(':
+			s.nParen++
 			tok = token.LPAREN
 		case ')':
+			s.nParen--
 			insertSemi = true
 			tok = token.RPAREN
 		case '[':
@@ -905,9 +934,14 @@ scanAgain:
 				insertSemi = true
 			}
 		case '-':
-			tok = s.switch3(token.SUB, token.SUB_ASSIGN, '-', token.DEC)
-			if tok == token.DEC {
-				insertSemi = true
+			if s.ch == '>' { // ->
+				s.next()
+				tok = token.SRARROW
+			} else { // --, -=
+				tok = s.switch3(token.SUB, token.SUB_ASSIGN, '-', token.DEC)
+				if tok == token.DEC {
+					insertSemi = true
+				}
 			}
 		case '*':
 			tok = s.switch2(token.MUL, token.MUL_ASSIGN)
@@ -917,7 +951,7 @@ scanAgain:
 				s.offset = s.file.Offset(pos)
 				s.rdOffset = s.offset + 1
 				s.insertSemi = false // newline consumed
-				return pos, token.SEMICOLON, "\n"
+				return pos, s.tokSEMICOLON(), "\n"
 			}
 			comment := s.scanComment()
 			if s.mode&ScanComments == 0 {
@@ -936,7 +970,7 @@ scanAgain:
 					s.offset = s.file.Offset(pos)
 					s.rdOffset = s.offset + 1
 					s.insertSemi = false // newline consumed
-					return pos, token.SEMICOLON, "\n"
+					return pos, s.tokSEMICOLON(), "\n"
 				}
 				comment := s.scanComment()
 				if s.mode&ScanComments == 0 {
@@ -954,16 +988,19 @@ scanAgain:
 		case '^':
 			tok = s.switch2(token.XOR, token.XOR_ASSIGN)
 		case '<':
-			if s.ch == '-' {
+			if s.ch == '-' { // <-
 				s.next()
 				tok = token.ARROW
-			} else {
+			} else if s.ch == '>' { // <>
+				s.next()
+				tok = token.BIDIARROW
+			} else { // << <<=
 				tok = s.switch4(token.LSS, token.LEQ, '<', token.SHL, token.SHL_ASSIGN)
 			}
 		case '>':
 			tok = s.switch4(token.GTR, token.GEQ, '>', token.SHR, token.SHR_ASSIGN)
 		case '=':
-			tok = s.switch3(token.ASSIGN, token.EQL, '>', token.RARROW)
+			tok = s.switch3(token.ASSIGN, token.EQL, '>', token.DRARROW)
 		case '!':
 			tok = s.switch2(token.NOT, token.NEQ)
 			if tok == token.NOT {
@@ -981,6 +1018,8 @@ scanAgain:
 		case '?':
 			tok = token.QUESTION
 			insertSemi = true
+		case '$':
+			tok = token.ENV
 		default:
 			// next reports unexpected BOMs - don't repeat
 			if ch != bom {
@@ -991,9 +1030,10 @@ scanAgain:
 			lit = string(ch)
 		}
 	}
+
+done:
 	if s.mode&dontInsertSemis == 0 {
 		s.insertSemi = insertSemi
 	}
-
 	return
 }

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Package install implements the ``gop install'' command.
+// Package install implements the “gop install” command.
 package install
 
 import (
@@ -22,15 +22,14 @@ import (
 	"log"
 	"os"
 	"reflect"
-	"syscall"
 
-	"github.com/goplus/gop"
+	"github.com/goplus/gogen"
 	"github.com/goplus/gop/cl"
 	"github.com/goplus/gop/cmd/internal/base"
+	"github.com/goplus/gop/tool"
 	"github.com/goplus/gop/x/gocmd"
-	"github.com/goplus/gop/x/gopenv"
 	"github.com/goplus/gop/x/gopprojs"
-	"github.com/goplus/gox"
+	"github.com/goplus/mod/modfetch"
 )
 
 // gop install
@@ -66,36 +65,42 @@ func runCmd(cmd *base.Command, args []string) {
 	}
 
 	if *flagDebug {
-		gox.SetDebug(gox.DbgFlagAll &^ gox.DbgFlagComments)
+		modfetch.SetDebug(modfetch.DbgFlagAll)
+		gogen.SetDebug(gogen.DbgFlagAll &^ gogen.DbgFlagComments)
 		cl.SetDebug(cl.DbgFlagAll)
 		cl.SetDisableRecover(true)
 	}
 
-	gopEnv := gopenv.Get()
-	conf := &gop.Config{Gop: gopEnv}
-	confCmd := &gocmd.Config{Gop: gopEnv}
+	conf, err := tool.NewDefaultConf(".", tool.ConfFlagNoTestFiles, pass.Tags())
+	if err != nil {
+		log.Panicln("tool.NewDefaultConf:", err)
+	}
+	defer conf.UpdateCache()
+
+	confCmd := conf.NewGoCmdConf()
 	confCmd.Flags = pass.Args
 	for _, proj := range projs {
 		install(proj, conf, confCmd)
 	}
 }
 
-func install(proj gopprojs.Proj, conf *gop.Config, install *gocmd.InstallConfig) {
+func install(proj gopprojs.Proj, conf *tool.Config, install *gocmd.InstallConfig) {
+	const flags = tool.GenFlagPrompt
 	var obj string
 	var err error
 	switch v := proj.(type) {
 	case *gopprojs.DirProj:
 		obj = v.Dir
-		err = gop.InstallDir(obj, conf, install)
+		err = tool.InstallDir(obj, conf, install, flags)
 	case *gopprojs.PkgPathProj:
 		obj = v.Path
-		err = gop.InstallPkgPath("", v.Path, conf, install)
+		err = tool.InstallPkgPath("", v.Path, conf, install, flags)
 	case *gopprojs.FilesProj:
-		err = gop.InstallFiles(v.Files, conf, install)
+		err = tool.InstallFiles(v.Files, conf, install)
 	default:
 		log.Panicln("`gop install` doesn't support", reflect.TypeOf(v))
 	}
-	if err == syscall.ENOENT {
+	if tool.NotFound(err) {
 		fmt.Fprintf(os.Stderr, "gop install %v: not found\n", obj)
 	} else if err != nil {
 		fmt.Fprintln(os.Stderr, err)

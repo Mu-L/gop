@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Package build implements the ``gop build'' command.
+// Package build implements the “gop build” command.
 package build
 
 import (
@@ -23,15 +23,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"syscall"
 
-	"github.com/goplus/gop"
+	"github.com/goplus/gogen"
 	"github.com/goplus/gop/cl"
 	"github.com/goplus/gop/cmd/internal/base"
+	"github.com/goplus/gop/tool"
 	"github.com/goplus/gop/x/gocmd"
-	"github.com/goplus/gop/x/gopenv"
 	"github.com/goplus/gop/x/gopprojs"
-	"github.com/goplus/gox"
 )
 
 // gop build
@@ -41,9 +39,9 @@ var Cmd = &base.Command{
 }
 
 var (
+	flag       = &Cmd.Flag
 	flagDebug  = flag.Bool("debug", false, "print debug information")
 	flagOutput = flag.String("o", "", "gop build output file")
-	flag       = &Cmd.Flag
 )
 
 func init() {
@@ -58,7 +56,7 @@ func runCmd(cmd *base.Command, args []string) {
 	}
 
 	if *flagDebug {
-		gox.SetDebug(gox.DbgFlagAll &^ gox.DbgFlagComments)
+		gogen.SetDebug(gogen.DbgFlagAll &^ gogen.DbgFlagComments)
 		cl.SetDebug(cl.DbgFlagAll)
 		cl.SetDisableRecover(true)
 	}
@@ -76,9 +74,13 @@ func runCmd(cmd *base.Command, args []string) {
 		log.Panicln("too many arguments:", args)
 	}
 
-	gopEnv := gopenv.Get()
-	conf := &gop.Config{Gop: gopEnv}
-	confCmd := &gocmd.BuildConfig{Gop: gopEnv}
+	conf, err := tool.NewDefaultConf(".", tool.ConfFlagNoTestFiles, pass.Tags())
+	if err != nil {
+		log.Panicln("tool.NewDefaultConf:", err)
+	}
+	defer conf.UpdateCache()
+
+	confCmd := conf.NewGoCmdConf()
 	if *flagOutput != "" {
 		output, err := filepath.Abs(*flagOutput)
 		if err != nil {
@@ -90,22 +92,23 @@ func runCmd(cmd *base.Command, args []string) {
 	build(proj, conf, confCmd)
 }
 
-func build(proj gopprojs.Proj, conf *gop.Config, build *gocmd.BuildConfig) {
+func build(proj gopprojs.Proj, conf *tool.Config, build *gocmd.BuildConfig) {
+	const flags = tool.GenFlagPrompt
 	var obj string
 	var err error
 	switch v := proj.(type) {
 	case *gopprojs.DirProj:
 		obj = v.Dir
-		err = gop.BuildDir(obj, conf, build)
+		err = tool.BuildDir(obj, conf, build, flags)
 	case *gopprojs.PkgPathProj:
 		obj = v.Path
-		err = gop.BuildPkgPath("", v.Path, conf, build)
+		err = tool.BuildPkgPath("", v.Path, conf, build, flags)
 	case *gopprojs.FilesProj:
-		err = gop.BuildFiles(v.Files, conf, build)
+		err = tool.BuildFiles(v.Files, conf, build)
 	default:
 		log.Panicln("`gop build` doesn't support", reflect.TypeOf(v))
 	}
-	if err == syscall.ENOENT {
+	if tool.NotFound(err) {
 		fmt.Fprintf(os.Stderr, "gop build %v: not found\n", obj)
 	} else if err != nil {
 		fmt.Fprintln(os.Stderr, err)

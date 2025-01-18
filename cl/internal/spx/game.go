@@ -17,7 +17,7 @@
 package spx
 
 const (
-	GopPackage = true
+	GopPackage = "github.com/goplus/gop/cl/internal/spx/pkg"
 	Gop_sched  = "Sched,SchedNow"
 )
 
@@ -27,6 +27,22 @@ type MyGame struct {
 }
 
 func Gopt_MyGame_Main(game interface{}) {
+}
+
+func (p *MyGame) Ls(n int) {}
+
+func (p *MyGame) Capout(doSth func()) (string, error) {
+	return "", nil
+}
+
+func (p *MyGame) Gop_Env(name string) int {
+	return 0
+}
+
+func (p *MyGame) Gop_Exec(name string, args ...any) {
+}
+
+func (p *MyGame) InitGameApp(args ...string) {
 }
 
 func (p *MyGame) Broadcast__0(msg string) {
@@ -39,6 +55,13 @@ func (p *MyGame) Broadcast__2(msg string, data interface{}, wait bool) {
 }
 
 func (p *MyGame) Play(media string, wait ...bool) {
+}
+
+func (p *MyGame) sendMessage(data interface{}) {
+}
+
+func (p *MyGame) SendMessage(data interface{}) {
+	p.sendMessage(data)
 }
 
 func Gopt_MyGame_Run(game interface{}, resource string) error {

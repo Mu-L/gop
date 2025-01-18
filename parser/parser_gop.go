@@ -21,15 +21,15 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 
 	goast "go/ast"
 	goparser "go/parser"
 
 	"github.com/goplus/gop/ast"
+	"github.com/goplus/gop/parser/fsx"
 	"github.com/goplus/gop/token"
 )
 
@@ -49,30 +49,13 @@ func SetDebug(dbgFlags int) {
 	debugParseError = (dbgFlags & DbgFlagParseError) != 0
 }
 
+var (
+	ErrUnknownFileKind = errors.New("unknown file kind")
+)
+
+type FileSystem = fsx.FileSystem
+
 // -----------------------------------------------------------------------------
-
-// FileSystem represents a file system.
-type FileSystem interface {
-	ReadDir(dirname string) ([]fs.FileInfo, error)
-	ReadFile(filename string) ([]byte, error)
-	Join(elem ...string) string
-}
-
-type localFS struct{}
-
-func (p localFS) ReadDir(dirname string) ([]fs.FileInfo, error) {
-	return ioutil.ReadDir(dirname)
-}
-
-func (p localFS) ReadFile(filename string) ([]byte, error) {
-	return os.ReadFile(filename)
-}
-
-func (p localFS) Join(elem ...string) string {
-	return filepath.Join(elem...)
-}
-
-var local FileSystem = localFS{}
 
 // Parse parses a single Go+ source file. The target specifies the Go+ source file.
 // If the file couldn't be read, a nil map and the respective error are returned.
@@ -100,18 +83,23 @@ func astFileToPkg(file *ast.File, fileName string) (pkg *ast.Package) {
 
 // ParseDir calls ParseFSDir by passing a local filesystem.
 func ParseDir(fset *token.FileSet, path string, filter func(fs.FileInfo) bool, mode Mode) (pkgs map[string]*ast.Package, first error) {
-	return ParseFSDir(fset, local, path, Config{Filter: filter, Mode: mode})
+	return ParseFSDir(fset, fsx.Local, path, Config{Filter: filter, Mode: mode})
 }
 
 type Config struct {
-	IsClass func(ext string) (isProj bool, ok bool)
-	Filter  func(fs.FileInfo) bool
-	Mode    Mode
+	ClassKind func(fname string) (isProj, ok bool)
+	Filter    func(fs.FileInfo) bool
+	Mode      Mode
 }
 
 // ParseDirEx calls ParseFSDir by passing a local filesystem.
 func ParseDirEx(fset *token.FileSet, path string, conf Config) (pkgs map[string]*ast.Package, first error) {
-	return ParseFSDir(fset, local, path, conf)
+	return ParseFSDir(fset, fsx.Local, path, conf)
+}
+
+// ParseEntry calls ParseFSEntry by passing a local filesystem.
+func ParseEntry(fset *token.FileSet, filename string, src interface{}, conf Config) (f *ast.File, err error) {
+	return ParseFSEntry(fset, fsx.Local, filename, src, conf)
 }
 
 // ParseFSDir calls ParseFile for all files with names ending in ".gop" in the
@@ -126,13 +114,17 @@ func ParseDirEx(fset *token.FileSet, path string, conf Config) (pkgs map[string]
 // If the directory couldn't be read, a nil map and the respective error are
 // returned. If a parse error occurred, a non-nil but incomplete map and the
 // first error encountered are returned.
-func ParseFSDir(fset *token.FileSet, fs FileSystem, path string, conf Config) (pkgs map[string]*ast.Package, first error) {
-	list, err := fs.ReadDir(path)
+func ParseFSDir(fset *token.FileSet, fs FileSystem, dir string, conf Config) (pkgs map[string]*ast.Package, first error) {
+	if conf.Mode&SaveAbsFile != 0 {
+		dir, _ = fs.Abs(dir)
+		conf.Mode &^= SaveAbsFile
+	}
+	list, err := fs.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	if conf.IsClass == nil {
-		conf.IsClass = defaultIsClass
+	if conf.ClassKind == nil {
+		conf.ClassKind = defaultClassKind
 	}
 	pkgs = make(map[string]*ast.Package)
 	for _, d := range list {
@@ -140,8 +132,8 @@ func ParseFSDir(fset *token.FileSet, fs FileSystem, path string, conf Config) (p
 			continue
 		}
 		fname := d.Name()
-		ext := filepath.Ext(fname)
-		var isProj, isClass, useGoParser bool
+		ext := path.Ext(fname)
+		var isProj, isClass, isNormalGox, useGoParser bool
 		switch ext {
 		case ".gop":
 		case ".go":
@@ -149,22 +141,27 @@ func ParseFSDir(fset *token.FileSet, fs FileSystem, path string, conf Config) (p
 				continue
 			}
 			useGoParser = (conf.Mode & ParseGoAsGoPlus) == 0
-		case ".gopx":
-			isClass = true
+		case ".gox":
+			isNormalGox = true
+			fallthrough
 		default:
-			if isProj, isClass = conf.IsClass(ext); !isClass {
+			if isProj, isClass = conf.ClassKind(fname); isClass {
+				isNormalGox = false
+			} else if isNormalGox { // not found Go+ class by ext, but is a .gox file
+				isClass = true
+			} else { // unknown fileKind
 				continue
 			}
 		}
 		mode := conf.Mode
-		if isProj || isClass {
+		if isClass {
 			mode |= ParseGoPlusClass
 		}
-		if !strings.HasPrefix(fname, "_") && (conf.Filter == nil || conf.Filter(d)) {
-			filename := fs.Join(path, fname)
+		if !strings.HasPrefix(fname, "_") && (conf.Filter == nil || filter(d, conf.Filter)) {
+			filename := fs.Join(dir, fname)
 			if useGoParser {
 				if filedata, err := fs.ReadFile(filename); err == nil {
-					if src, err := goparser.ParseFile(fset, filename, filedata, goparser.Mode(conf.Mode)); err == nil {
+					if src, err := goparser.ParseFile(fset, filename, filedata, goparser.Mode(conf.Mode&goReservedFlags)); err == nil {
 						pkg := reqPkg(pkgs, src.Name.Name)
 						if pkg.GoFiles == nil {
 							pkg.GoFiles = make(map[string]*goast.File)
@@ -176,16 +173,63 @@ func ParseFSDir(fset *token.FileSet, fs FileSystem, path string, conf Config) (p
 				} else {
 					first = err
 				}
-			} else if src, err := ParseFSFile(fset, fs, filename, nil, mode); err == nil {
-				src.IsProj, src.IsClass = isProj, isClass
-				pkg := reqPkg(pkgs, src.Name.Name)
-				pkg.Files[filename] = src
-			} else if first == nil {
-				first = err
+			} else {
+				f, err := ParseFSFile(fset, fs, filename, nil, mode)
+				if f != nil {
+					f.IsProj, f.IsClass = isProj, isClass
+					f.IsNormalGox = isNormalGox
+					if f.Name != nil {
+						pkg := reqPkg(pkgs, f.Name.Name)
+						pkg.Files[filename] = f
+					}
+				}
+				if err != nil && first == nil {
+					first = err
+				}
 			}
 		}
 	}
 	return
+}
+
+// ParseFSEntry parses the source code of a single Go+ source file and returns the corresponding ast.File node.
+// Compared to ParseFSFile, ParseFSEntry detects fileKind by its filename.
+func ParseFSEntry(fset *token.FileSet, fs FileSystem, filename string, src interface{}, conf Config) (f *ast.File, err error) {
+	fname := fs.Base(filename)
+	ext := path.Ext(fname)
+	var isProj, isClass, isNormalGox bool
+	switch ext {
+	case ".gop", ".go":
+	case ".gox":
+		isNormalGox = true
+		fallthrough
+	default:
+		if conf.ClassKind == nil {
+			conf.ClassKind = defaultClassKind
+		}
+		if isProj, isClass = conf.ClassKind(fname); isClass {
+			isNormalGox = false
+		} else if isNormalGox { // not found Go+ class by ext, but is a .gox file
+			isClass = true
+		} else {
+			return nil, ErrUnknownFileKind
+		}
+	}
+	mode := conf.Mode
+	if isClass {
+		mode |= ParseGoPlusClass
+	}
+	f, err = ParseFSFile(fset, fs, filename, src, mode)
+	if f != nil {
+		f.IsProj, f.IsClass = isProj, isClass
+		f.IsNormalGox = isNormalGox
+	}
+	return
+}
+
+func filter(d fs.DirEntry, fn func(fs.FileInfo) bool) bool {
+	fi, err := d.Info()
+	return err == nil && fn(fi)
 }
 
 func reqPkg(pkgs map[string]*ast.Package, name string) *ast.Package {
@@ -200,27 +244,69 @@ func reqPkg(pkgs map[string]*ast.Package, name string) *ast.Package {
 	return pkg
 }
 
-func defaultIsClass(ext string) (isProj bool, ok bool) {
+func defaultClassKind(fname string) (isProj bool, ok bool) {
+	ext := path.Ext(fname)
 	switch ext {
-	case ".gmx":
-		isProj = true
-		fallthrough
 	case ".spx":
-		ok = true
+		return fname == "main.spx", true
+	case ".gsh", ".gmx":
+		return true, true
 	}
 	return
 }
 
 // -----------------------------------------------------------------------------
 
+// ParseFiles parses Go+ source files and returns the corresponding packages.
 func ParseFiles(fset *token.FileSet, files []string, mode Mode) (map[string]*ast.Package, error) {
-	return ParseFSFiles(fset, local, files, mode)
+	return ParseFSFiles(fset, fsx.Local, files, mode)
 }
 
+// ParseFSFiles parses Go+ source files and returns the corresponding packages.
 func ParseFSFiles(fset *token.FileSet, fs FileSystem, files []string, mode Mode) (map[string]*ast.Package, error) {
 	ret := map[string]*ast.Package{}
+	fabs := (mode & SaveAbsFile) != 0
+	if fabs {
+		mode &^= SaveAbsFile
+	}
 	for _, file := range files {
+		if fabs {
+			file, _ = fs.Abs(file)
+		}
 		f, err := ParseFSFile(fset, fs, file, nil, mode)
+		if err != nil {
+			return nil, err
+		}
+		pkgName := f.Name.Name
+		pkg, ok := ret[pkgName]
+		if !ok {
+			pkg = &ast.Package{Name: pkgName, Files: make(map[string]*ast.File)}
+			ret[pkgName] = pkg
+		}
+		pkg.Files[file] = f
+	}
+	return ret, nil
+}
+
+// ParseEntries parses Go+ source files and returns the corresponding packages.
+// Compared to ParseFiles, ParseEntries detects fileKind by its filename.
+func ParseEntries(fset *token.FileSet, files []string, conf Config) (map[string]*ast.Package, error) {
+	return ParseFSEntries(fset, fsx.Local, files, conf)
+}
+
+// ParseFSEntries parses Go+ source files and returns the corresponding packages.
+// Compared to ParseFSFiles, ParseFSEntries detects fileKind by its filename.
+func ParseFSEntries(fset *token.FileSet, fs FileSystem, files []string, conf Config) (map[string]*ast.Package, error) {
+	ret := map[string]*ast.Package{}
+	fabs := (conf.Mode & SaveAbsFile) != 0
+	if fabs {
+		conf.Mode &^= SaveAbsFile
+	}
+	for _, file := range files {
+		if fabs {
+			file, _ = fs.Abs(file)
+		}
+		f, err := ParseFSEntry(fset, fs, file, nil, conf)
 		if err != nil {
 			return nil, err
 		}
@@ -239,19 +325,17 @@ func ParseFSFiles(fset *token.FileSet, fs FileSystem, files []string, mode Mode)
 
 // ParseFile parses the source code of a single Go+ source file and returns the corresponding ast.File node.
 func ParseFile(fset *token.FileSet, filename string, src interface{}, mode Mode) (f *ast.File, err error) {
-	return ParseFSFile(fset, local, filename, src, mode)
+	return ParseFSFile(fset, fsx.Local, filename, src, mode)
 }
 
 // ParseFSFile parses the source code of a single Go+ source file and returns the corresponding ast.File node.
 func ParseFSFile(fset *token.FileSet, fs FileSystem, filename string, src interface{}, mode Mode) (f *ast.File, err error) {
-	var code []byte
-	if src == nil {
-		code, err = fs.ReadFile(filename)
-	} else {
-		code, err = readSource(src)
-	}
+	code, err := readSourceFS(fs, filename, src)
 	if err != nil {
 		return
+	}
+	if mode&SaveAbsFile != 0 {
+		filename, _ = fs.Abs(filename)
 	}
 	return parseFile(fset, filename, code, mode)
 }
@@ -272,9 +356,26 @@ func readSource(src interface{}) ([]byte, error) {
 			return s.Bytes(), nil
 		}
 	case io.Reader:
-		return ioutil.ReadAll(s)
+		return io.ReadAll(s)
 	}
 	return nil, errInvalidSource
+}
+
+// If src != nil, readSource converts src to a []byte if possible;
+// otherwise it returns an error. If src == nil, readSource returns
+// the result of reading the file specified by filename.
+func readSourceLocal(filename string, src interface{}) ([]byte, error) {
+	if src != nil {
+		return readSource(src)
+	}
+	return os.ReadFile(filename)
+}
+
+func readSourceFS(fs FileSystem, filename string, src interface{}) ([]byte, error) {
+	if src != nil {
+		return readSource(src)
+	}
+	return fs.ReadFile(filename)
 }
 
 // -----------------------------------------------------------------------------

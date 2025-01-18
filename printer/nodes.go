@@ -66,13 +66,13 @@ func SetDebug(flags int) {
 // printed.
 //
 // TODO(gri): linebreak may add too many lines if the next statement at "line"
-//            is preceded by comments because the computation of n assumes
-//            the current position before the comment and the target position
-//            after the comment. Thus, after interspersing such comments, the
-//            space taken up by them is not considered to reduce the number of
-//            linebreaks. At the moment there is no easy way to know about
-//            future (not yet interspersed) comments in this function.
 //
+//	is preceded by comments because the computation of n assumes
+//	the current position before the comment and the target position
+//	after the comment. Thus, after interspersing such comments, the
+//	space taken up by them is not considered to reduce the number of
+//	linebreaks. At the moment there is no easy way to know about
+//	future (not yet interspersed) comments in this function.
 func (p *printer) linebreak(line, min int, ws whiteSpace, newSection bool) (nbreaks int) {
 	n := nlimit(line - p.pos.Line)
 	if n < min {
@@ -153,8 +153,9 @@ const filteredMsg = "contains filtered or unexported fields"
 // expressions.
 //
 // TODO(gri) Consider rewriting this to be independent of []ast.Expr
-//           so that we can use the algorithm for any kind of list
-//           (e.g., pass list via a channel over which to range).
+//
+//	so that we can use the algorithm for any kind of list
+//	(e.g., pass list via a channel over which to range).
 func (p *printer) exprList(prev0 token.Pos, list []ast.Expr, depth int, mode exprListMode, next0 token.Pos, isIncomplete bool) {
 	if len(list) == 0 {
 		if isIncomplete {
@@ -690,6 +691,7 @@ func reduceDepth(depth int) int {
 // (Algorithm suggestion by Russ Cox.)
 //
 // The precedences are:
+//
 //	5             *  /  %  <<  >>  &  &^
 //	4             +  -  |  ^
 //	3             ==  !=  <  <=  >  >=
@@ -702,25 +704,24 @@ func reduceDepth(depth int) int {
 // To choose the cutoff, look at the whole expression but excluding primary
 // expressions (function calls, parenthesized exprs), and apply these rules:
 //
-//	1) If there is a binary operator with a right side unary operand
-//	   that would clash without a space, the cutoff must be (in order):
+//  1. If there is a binary operator with a right side unary operand
+//     that would clash without a space, the cutoff must be (in order):
 //
-//		/*	6
-//		&&	6
-//		&^	6
-//		++	5
-//		--	5
+//     /*	6
+//     &&	6
+//     &^	6
+//     ++	5
+//     --	5
 //
-//         (Comparison operators always have spaces around them.)
+//     (Comparison operators always have spaces around them.)
 //
-//	2) If there is a mix of level 5 and level 4 operators, then the cutoff
-//	   is 5 (use spaces to distinguish precedence) in Normal mode
-//	   and 4 (never use spaces) in Compact mode.
+//  2. If there is a mix of level 5 and level 4 operators, then the cutoff
+//     is 5 (use spaces to distinguish precedence) in Normal mode
+//     and 4 (never use spaces) in Compact mode.
 //
-//	3) If there are no level 4 operators or no level 5 operators, then the
-//	   cutoff is 6 (always use spaces) in Normal mode
-//	   and 4 (never use spaces) in Compact mode.
-//
+//  3. If there are no level 4 operators or no level 5 operators, then the
+//     cutoff is 6 (always use spaces) in Normal mode
+//     and 4 (never use spaces) in Compact mode.
 func (p *printer) binaryExpr(x *ast.BinaryExpr, prec1, cutoff, depth int) {
 	prec := x.Op.Precedence()
 	if prec < prec1 {
@@ -823,6 +824,10 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 
 	case *ast.BasicLit:
 		p.print(x)
+
+	case *ast.NumberUnitLit:
+		p.print(&ast.BasicLit{Kind: x.Kind, Value: x.Value})
+		p.print(&ast.Ident{Name: x.Unit})
 
 	case *ast.FuncLit:
 		p.print(x.Type.Pos(), token.FUNC)
@@ -967,6 +972,24 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 		p.print(indent, unindent, mode, x.Rbrace, token.RBRACE, mode)
 		p.level--
 
+	case *ast.MatrixLit:
+		p.level++
+		p.print(x.Lbrack, token.LBRACK, newline, indent)
+		var last = len(x.Elts) - 1
+		var incomplete bool
+		for i, elts := range x.Elts {
+			if i == last {
+				incomplete = x.Incomplete
+			}
+			p.exprList(elts[0].Pos(), elts, 1, 0, elts[len(elts)-1].End(), incomplete)
+			p.print(newline)
+		}
+		mode := noExtraLinebreak | noExtraBlank
+		// need the initial indent to print lone comments with
+		// the proper level of indentation
+		p.print(unindent, mode, x.Rbrack, token.RBRACK, mode)
+		p.level--
+
 	case *ast.Ellipsis:
 		p.print(token.ELLIPSIS)
 		if x.Elt != nil {
@@ -1033,7 +1056,7 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 			p.print(token.LBRACK)
 			p.expr0(x.Elt, depth+1)
 			p.print(blank)
-			p.listForPhrase(x.Lpos, x.Fors, depth, x.Rpos)
+			p.listForPhrase(x.Fors)
 			p.print(token.RBRACK)
 		default: // {...}
 			p.print(token.LBRACE)
@@ -1047,7 +1070,7 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 				}
 				p.print(blank)
 			}
-			p.listForPhrase(x.Lpos, x.Fors, depth, x.Rpos)
+			p.listForPhrase(x.Fors)
 			p.print(token.RBRACE)
 		}
 	case *ast.ErrWrapExpr:
@@ -1066,7 +1089,7 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 			p.expr(x.Lhs[0])
 			p.print(blank)
 		}
-		p.print(token.RARROW, blank)
+		p.print(token.DRARROW, blank)
 		if x.RhsHasParen {
 			p.print(token.LPAREN)
 			p.exprList(token.NoPos, x.Rhs, 1, noIndent, token.NoPos, false)
@@ -1084,7 +1107,7 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 			p.expr(x.Lhs[0])
 			p.print(blank)
 		}
-		p.print(token.RARROW, blank)
+		p.print(token.DRARROW, blank)
 		p.block(x.Body, 1)
 
 	case *ast.RangeExpr:
@@ -1100,12 +1123,24 @@ func (p *printer) expr1(expr ast.Expr, prec1, depth int) {
 			p.expr(x.Expr3)
 		}
 
+	case *ast.EnvExpr:
+		p.print(token.ENV)
+		if x.HasBrace() {
+			p.print(token.LBRACE, x.Name, token.RBRACE)
+		} else {
+			p.print(x.Name)
+		}
+
+	case *ast.ElemEllipsis:
+		p.expr(x.Elt)
+		p.print(token.ELLIPSIS)
+
 	default:
 		log.Fatalf("unreachable %T\n", x)
 	}
 }
 
-func (p *printer) listForPhrase(prev0 token.Pos, list []*ast.ForPhrase, depth int, next0 token.Pos) {
+func (p *printer) listForPhrase(list []*ast.ForPhrase) {
 	for i, x := range list {
 		if i > 0 {
 			p.print(blank)
@@ -1293,7 +1328,6 @@ func (p *printer) controlClause(isForStmt bool, init ast.Stmt, expr ast.Expr, po
 // indentList reports whether an expression list would look better if it
 // were indented wholesale (starting with the very first element, rather
 // than starting at the first line break).
-//
 func (p *printer) indentList(list []ast.Expr) bool {
 	// Heuristic: indentList reports whether there are more than one multi-
 	// line element in the list, or if there is any element that is not
@@ -1508,7 +1542,9 @@ func (p *printer) stmt(stmt ast.Stmt, nextIsRBrace bool) {
 			}
 			p.print(blank, s.TokPos, s.Tok, blank)
 		}
-		p.print(token.RANGE, blank)
+		if !s.NoRangeOp {
+			p.print(token.RANGE, blank)
+		}
 		p.expr(stripParens(s.X))
 		p.print(blank)
 		p.block(s.Body, 1)
@@ -1549,24 +1585,23 @@ type NewlineStmt struct {
 //
 // For example, the declaration:
 //
-//	const (
-//		foobar int = 42 // comment
-//		x          = 7  // comment
-//		foo
-//              bar = 991
-//	)
+//		const (
+//			foobar int = 42 // comment
+//			x          = 7  // comment
+//			foo
+//	             bar = 991
+//		)
 //
 // leads to the type/values matrix below. A run of value columns (V) can
 // be moved into the type column if there is no type for any of the values
 // in that column (we only move entire columns so that they align properly).
 //
-//	matrix        formatted     result
-//                    matrix
-//	T  V    ->    T  V     ->   true      there is a T and so the type
-//	-  V          -  V          true      column must be kept
-//	-  -          -  -          false
-//	-  V          V  -          false     V is moved into T column
-//
+//		matrix        formatted     result
+//	                   matrix
+//		T  V    ->    T  V     ->   true      there is a T and so the type
+//		-  V          -  V          true      column must be kept
+//		-  -          -  -          false
+//		-  V          V  -          false     V is moved into T column
 func keepTypeColumn(specs []ast.Spec) []bool {
 	m := make([]bool, len(specs))
 
@@ -1612,11 +1647,21 @@ func (p *printer) valueSpec(s *ast.ValueSpec, keepType bool) {
 	p.identList(s.Names, false) // always present
 	extraTabs := 3
 	if s.Type != nil || keepType {
-		p.print(vtab)
+		if len(s.Names) > 0 {
+			p.print(vtab)
+		}
 		extraTabs--
 	}
 	if s.Type != nil {
 		p.expr(s.Type)
+	}
+	if s.Tag != nil {
+		if len(s.Names) > 0 {
+			p.print(vtab)
+		}
+		p.print(vtab)
+		p.expr(s.Tag)
+		extraTabs--
 	}
 	if s.Values != nil {
 		p.print(vtab, token.ASSIGN, blank)
@@ -1677,7 +1722,6 @@ func sanitizeImportPath(lit *ast.BasicLit) *ast.BasicLit {
 // The parameter n is the number of specs in the group. If doIndent is set,
 // multi-line identifier lists in the spec are indented when the first
 // linebreak is encountered.
-//
 func (p *printer) spec(spec ast.Spec, n int, doIndent bool) {
 	switch s := spec.(type) {
 	case *ast.ImportSpec:
@@ -1697,7 +1741,9 @@ func (p *printer) spec(spec ast.Spec, n int, doIndent bool) {
 		p.setComment(s.Doc)
 		p.identList(s.Names, doIndent) // always present
 		if s.Type != nil {
-			p.print(blank)
+			if len(s.Names) > 0 {
+				p.print(blank)
+			}
 			p.expr(s.Type)
 		}
 		if s.Values != nil {
@@ -1727,11 +1773,13 @@ func (p *printer) spec(spec ast.Spec, n int, doIndent bool) {
 
 func (p *printer) genDecl(d *ast.GenDecl) {
 	p.setComment(d.Doc)
-	p.print(d.Pos(), d.Tok, blank)
+	p.setPos(d.Pos())
+	p.print(d.Tok, blank)
 
 	if d.Lparen.IsValid() || len(d.Specs) > 1 {
 		// group of parenthesized declarations
-		p.print(d.Lparen, token.LPAREN)
+		p.setPos(d.Lparen)
+		p.print(token.LPAREN)
 		if n := len(d.Specs); n > 0 {
 			p.print(indent, formfeed)
 			if n > 1 && (d.Tok == token.CONST || d.Tok == token.VAR) {
@@ -1758,7 +1806,8 @@ func (p *printer) genDecl(d *ast.GenDecl) {
 			}
 			p.print(unindent, formfeed)
 		}
-		p.print(d.Rparen, token.RPAREN)
+		p.setPos(d.Rparen)
+		p.print(token.RPAREN)
 
 	} else if len(d.Specs) > 0 {
 		// single declaration
@@ -1770,7 +1819,6 @@ func (p *printer) genDecl(d *ast.GenDecl) {
 // The result is <= maxSize if the node fits on one line with at
 // most maxSize chars and the formatted output doesn't contain
 // any control chars. Otherwise, the result is > maxSize.
-//
 func (p *printer) nodeSize(n ast.Node, maxSize int) (size int) {
 	// nodeSize invokes the printer, which may invoke nodeSize
 	// recursively. For deep composite literal nests, this can
@@ -1844,7 +1892,6 @@ func (p *printer) bodySize(b *ast.BlockStmt, maxSize int) int {
 // the block is printed on the current line, without line breaks, spaced from the header
 // by sep. Otherwise the block's opening "{" is printed on the current line, followed by
 // lines for the block's statements and its closing "}".
-//
 func (p *printer) funcBody(headerSize int, sep whiteSpace, b *ast.BlockStmt) {
 	if b == nil {
 		return
@@ -1884,8 +1931,8 @@ func (p *printer) funcBody(headerSize int, sep whiteSpace, b *ast.BlockStmt) {
 // the block is printed on the current line, without line breaks, spaced from the header
 // by sep. Otherwise the block's opening "{" is printed on the current line, followed by
 // lines for the block's statements and its closing "}".
-//
 func (p *printer) funcBodyUnnamed(headerSize int, sep whiteSpace, b *ast.BlockStmt) {
+	_, _ = headerSize, sep
 	if b == nil {
 		return
 	}
@@ -1961,7 +2008,7 @@ func (p *printer) funcDecl(d *ast.FuncDecl) {
 	}
 	p.setComment(d.Doc)
 
-	if p.unnamedFuncName == d.Name.Name {
+	if p.shadowEntry == d {
 		p.funcBodyUnnamed(0, vtab, d.Body)
 		return
 	}
@@ -1973,8 +2020,17 @@ func (p *printer) funcDecl(d *ast.FuncDecl) {
 	// FUNC is emitted).
 	startCol := p.out.Column - len("func ")
 	if d.Recv != nil {
-		p.parameters(d.Recv) // method: print receiver
-		p.print(blank)
+		if d.Static { // static method
+			if !d.IsClass {
+				if list := d.Recv.List; len(list) > 0 {
+					p.expr(list[0].Type)
+				}
+			}
+			p.print(token.PERIOD)
+		} else if !d.IsClass {
+			p.parameters(d.Recv) // method: print receiver
+			p.print(blank)
+		}
 	}
 	p.expr(d.Name)
 	if d.Operator && d.Recv != nil {
@@ -1982,6 +2038,28 @@ func (p *printer) funcDecl(d *ast.FuncDecl) {
 	}
 	p.signature(d.Type.Params, d.Type.Results)
 	p.funcBody(p.distanceFrom(d.Pos(), startCol), vtab, d.Body)
+}
+
+func (p *printer) overloadFuncDecl(d *ast.OverloadFuncDecl) {
+	if debugFormat {
+		log.Println("==> Format OverloadFunc", d.Name.Name)
+	}
+	p.setComment(d.Doc)
+
+	pos := d.Pos()
+	p.print(pos, token.FUNC, blank)
+	if d.Recv != nil && !d.IsClass {
+		p.parameters(d.Recv) // method: print receiver
+		p.print(token.PERIOD)
+	}
+	p.expr(d.Name)
+	p.print(blank, token.ASSIGN, blank, token.LPAREN, newline)
+	for _, fn := range d.Funcs {
+		p.print(indent)
+		p.expr1(fn, token.LowestPrec, 1)
+		p.print(unindent, newline)
+	}
+	p.print(token.RPAREN)
 }
 
 func (p *printer) decl(decl ast.Decl) {
@@ -1992,6 +2070,8 @@ func (p *printer) decl(decl ast.Decl) {
 		p.genDecl(d)
 	case *ast.FuncDecl:
 		p.funcDecl(d)
+	case *ast.OverloadFuncDecl:
+		p.overloadFuncDecl(d)
 	default:
 		panic("unreachable")
 	}
@@ -2014,6 +2094,10 @@ func declToken(decl ast.Decl) (tok token.Token) {
 func (p *printer) declList(list []ast.Decl) {
 	tok := token.ILLEGAL
 	for _, d := range list {
+		// skip no entry shadow
+		if decl, ok := d.(*ast.FuncDecl); ok && decl.Shadow && decl != p.shadowEntry {
+			continue
+		}
 		prev := tok
 		tok = declToken(d)
 		// If the declaration token changed (e.g., from CONST to TYPE)
@@ -2039,9 +2123,7 @@ func (p *printer) declList(list []ast.Decl) {
 }
 
 func (p *printer) file(src *ast.File) {
-	if src.NoEntrypoint {
-		p.unnamedFuncName = "main"
-	}
+	p.shadowEntry = src.ShadowEntry
 	p.setComment(src.Doc)
 	if !src.NoPkgDecl {
 		p.print(src.Pos(), token.PACKAGE, blank)
@@ -2049,5 +2131,4 @@ func (p *printer) file(src *ast.File) {
 	}
 	p.declList(src.Decls)
 	p.print(newline)
-	p.unnamedFuncName = ""
 }

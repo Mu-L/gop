@@ -2,24 +2,41 @@ name: Go+ CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+    - "*"
   pull_request:
-    branches: [ main ]
+    branches:
+    - "*"
 
 jobs:
+  Check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check goreleaser files
+      run: |
+        pip install --no-input pyyaml
+        python .github/workflows/check_goreleaser_config.py
+
   Test:
     strategy:
       matrix:
-        go-version: [1.16.x, 1.17.x, 1.18.x, 1.19.x, 1.20.x]
-        os: [ubuntu-latest, windows-latest, macos-11]
+        os:
+        - ubuntu-latest
+        - windows-latest
+        - macos-latest
+        go:
+        - 1.19.x
+        - 1.21.x
+        - 1.22.x
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: ${{ matrix.go }}
 
     - name: Test Go+ installer
       run: |
@@ -27,11 +44,10 @@ jobs:
         git config --global user.name "build robot"
         go test -v cmd/make_test.go
 
-    - name: Compile gop and related tools
-      run: go install ./...
-
     - name: Run testcases
       run: go test -v -coverprofile="coverage.txt" -covermode=atomic ./...
 
     - name: Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v5
+      with:
+        slug: goplus/gop

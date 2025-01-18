@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	dataDir  = "testdata"
+	dataDir  = "demo"
 	tabwidth = 8
 )
 
@@ -83,7 +83,6 @@ func format(src []byte, mode checkMode) ([]byte, error) {
 // TestLineComments, using a simple test case, checks that consecutive line
 // comments are properly terminated with a newline even if the AST position
 // information is incorrect.
-//
 func TestLineComments(t *testing.T) {
 	const src = `// comment 1
 	// comment 2
@@ -502,7 +501,7 @@ func TestWriteErrors(t *testing.T) {
 	}
 }
 
-// TextX is a skeleton test that can be filled in for debugging one-off cases.
+// TestX is a skeleton test that can be filled in for debugging one-off cases.
 // Do not remove.
 func TestX(t *testing.T) {
 	const src = `

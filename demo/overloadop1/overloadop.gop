@@ -1,0 +1,44 @@
+type foo struct {
+}
+
+func (a foo) + (b foo) (ret foo) {
+	println "a + b"
+	return
+}
+
+func (a foo) - (b foo) (ret foo) {
+	println "a - b"
+	return
+}
+
+func (a foo) -> (b foo) {
+	println "a -> b"
+}
+
+func (a foo) <> (b foo) {
+	println "a <> b"
+}
+
+func -(a foo) (ret foo) {
+	println "-a"
+	return
+}
+
+func ++(a foo) {
+	println "a++"
+}
+
+func (a foo) != (b foo) bool {
+	println "a != b"
+	return true
+}
+
+var a, b foo
+var c = a + b
+var d = a - b
+var e = -a
+var f = a != b
+println f
+a++
+a -> b
+a <> b

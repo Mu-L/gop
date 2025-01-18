@@ -34,7 +34,7 @@ import (
 )
 
 func checkPathExist(path string, isDir bool) bool {
-	stat, err := os.Stat(path)
+	stat, err := os.Lstat(path) // Note: os.Lstat() will not follow the symbolic link.
 	isExists := !os.IsNotExist(err)
 	if isDir {
 		return isExists && stat.IsDir()
@@ -246,11 +246,17 @@ func getBuildDateTime() string {
 }
 
 func getBuildVer() string {
-	stdout, err := execCommand("git", "describe", "--tags")
+	latestTagCommit, err := execCommand("git", "rev-list", "--tags", "--max-count=1")
 	if err != nil {
 		return ""
 	}
-	return trimRight(stdout)
+
+	stdout, err := execCommand("git", "describe", "--tags", trimRight(latestTagCommit))
+	if err != nil {
+		return ""
+	}
+
+	return fmt.Sprintf("%s devel", trimRight(stdout))
 }
 
 func getGopBuildFlags() string {
@@ -452,7 +458,7 @@ func isInChinaWindows() bool {
 		return false
 	}
 	// Check if output contains `zh-cn;`
-	return strings.Contains(out, "zh-cn;") || strings.Contains(out, "zh-hk;")
+	return strings.Contains(out, "zh-cn;")
 }
 
 func isInChina() bool {
@@ -466,7 +472,7 @@ func isInChina() bool {
 	}
 	if strings.HasPrefix(out, prefix) {
 		out = out[len(prefix):]
-		return strings.HasPrefix(out, "zh_CN") || strings.HasPrefix(out, "zh_HK")
+		return strings.HasPrefix(out, "zh_CN")
 	}
 	return false
 }
@@ -542,10 +548,28 @@ func releaseNewVersion(tag string) {
 	println("Released new version:", version)
 }
 
+func runRegtests() {
+	println("\nStart running regtests.")
+
+	cmd := exec.Command(filepath.Join(gopRoot, "bin/"+gopBinFiles[0]), "go", "./...")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Dir = filepath.Join(gopRoot, "demo")
+	err := cmd.Run()
+	if err != nil {
+		code := cmd.ProcessState.ExitCode()
+		if code == 0 {
+			code = 1
+		}
+		os.Exit(code)
+	}
+}
+
 func main() {
 	isInstall := flag.Bool("install", false, "Install Go+")
 	isBuild := flag.Bool("build", false, "Build Go+ tools")
 	isTest := flag.Bool("test", false, "Run testcases")
+	isRegtest := flag.Bool("regtest", false, "Run regtests")
 	isUninstall := flag.Bool("uninstall", false, "Uninstall Go+")
 	isGoProxy := flag.Bool("proxy", false, "Set GOPROXY for people in China")
 	isAutoProxy := flag.Bool("autoproxy", false, "Check to set GOPROXY automatically")
@@ -566,10 +590,11 @@ func main() {
 		},
 		isUninstall: uninstall,
 		isTest:      runTestcases,
+		isRegtest:   runRegtests,
 	}
 
 	// Sort flags, for example: install flag should be checked earlier than test flag.
-	flags := []*bool{isBuild, isInstall, isTest, isUninstall}
+	flags := []*bool{isBuild, isInstall, isTest, isRegtest, isUninstall}
 	hasActionDone := false
 
 	if *tag != "" {

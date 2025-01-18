@@ -1,5 +1,18 @@
-//go:build go1.18
-// +build go1.18
+/*
+ * Copyright (c) 2022 The GoPlus Authors (goplus.org). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cl_test
 
@@ -10,9 +23,32 @@ import (
 	"testing"
 
 	"github.com/goplus/gop/cl"
+	"github.com/goplus/gop/cl/cltest"
 	"github.com/goplus/gop/parser"
-	"github.com/goplus/gop/parser/parsertest"
+	"github.com/goplus/gop/parser/fsx/memfs"
 )
+
+func TestTypeParams(t *testing.T) {
+	gopMixedClTest(t, "main", `package main
+
+type Data[X, Y any] struct {
+	v X
+}
+
+func (p *Data[T, R]) foo() {
+	fmt.Println(p.v)
+}
+`, `
+v := Data[int, float64]{1}
+v.foo()
+`, `package main
+
+func main() {
+	v := Data[int, float64]{1}
+	v.foo()
+}
+`)
+}
 
 func TestTypeParamsFunc(t *testing.T) {
 	gopMixedClTest(t, "main", `package main
@@ -144,7 +180,7 @@ v3.Append([1,2,3,4]...)
 v3.Append2([1,2,3,4]...)
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type DataString = Data[string]
 type SliceString = Slice[[]string, string]
@@ -203,16 +239,15 @@ func mixedErrorTest(t *testing.T, msg, gocode, gopcode string) {
 }
 
 func mixedErrorTestEx(t *testing.T, pkgname, msg, gocode, gopcode string) {
-	fs := parsertest.NewTwoFilesFS("/foo", "a.go", gocode, "b.gop", gopcode)
-	pkgs, err := parser.ParseFSDir(gblFset, fs, "/foo", parser.Config{})
+	fs := memfs.TwoFiles("/foo", "a.go", gocode, "b.gop", gopcode)
+	pkgs, err := parser.ParseFSDir(cltest.Conf.Fset, fs, "/foo", parser.Config{})
 	if err != nil {
 		scanner.PrintError(os.Stderr, err)
 		t.Fatal("parser.ParseFSDir failed")
 	}
-	conf := *gblConf
+	conf := *cltest.Conf
 	conf.NoFileLine = false
-	conf.WorkingDir = "/foo"
-	conf.TargetDir = "/foo"
+	conf.RelativeBase = "/foo"
 	bar := pkgs[pkgname]
 	_, err = cl.NewPackage("", bar, &conf)
 	if err == nil {
@@ -227,11 +262,11 @@ func TestTypeParamsErrorInstantiate(t *testing.T) {
 	var msg string
 	switch runtime.Version()[:6] {
 	case "go1.18":
-		msg = `./b.gop:2:1: uint does not implement Number`
+		msg = `b.gop:2:1: uint does not implement Number`
 	case "go1.19":
-		msg = `./b.gop:2:1: uint does not implement Number (uint missing in ~int | float64)`
+		msg = `b.gop:2:1: uint does not implement Number (uint missing in ~int | float64)`
 	default:
-		msg = `./b.gop:2:1: uint does not satisfy Number (uint missing in ~int | float64)`
+		msg = `b.gop:2:1: uint does not satisfy Number (uint missing in ~int | float64)`
 	}
 
 	mixedErrorTest(t, msg, `
@@ -259,9 +294,11 @@ func TestTypeParamsErrorMatch(t *testing.T) {
 	var msg string
 	switch runtime.Version()[:6] {
 	case "go1.18", "go1.19":
-		msg = `./b.gop:2:5: T does not match ~[]E`
+		msg = `b.gop:2:5: T does not match ~[]E`
+	case "go1.20":
+		msg = `b.gop:2:5: int does not match ~[]E`
 	default:
-		msg = `./b.gop:2:5: int does not match ~[]E`
+		msg = `b.gop:2:5: T (type int) does not satisfy interface{interface{~[]E}}`
 	}
 	mixedErrorTest(t, msg, `
 package main
@@ -277,7 +314,7 @@ _ = At[int]
 }
 
 func TestTypeParamsErrInferFunc(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:5: cannot infer T2 (/foo/a.go:4:21)`, `
+	mixedErrorTest(t, `b.gop:2:5: cannot infer T2 (/foo/a.go:4:21)`, `
 package main
 
 func Loader[T1 any, T2 any](p1 T1, p2 T2) T1 {
@@ -289,7 +326,7 @@ _ = Loader[int]
 }
 
 func TestTypeParamsErrArgumentsParameters1(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:7: got 1 type arguments but Data[T1, T2 interface{}] has 2 type parameters`, `
+	mixedErrorTest(t, `b.gop:2:7: got 1 type arguments but Data[T1, T2 interface{}] has 2 type parameters`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -302,7 +339,7 @@ var v Data[int]
 }
 
 func TestTypeParamsErrArgumentsParameters2(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:7: got 3 type arguments but Data[T1, T2 interface{}] has 2 type parameters`, `
+	mixedErrorTest(t, `b.gop:2:7: got 3 type arguments but Data[T1, T2 interface{}] has 2 type parameters`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -315,7 +352,7 @@ var v Data[int,int,int]
 }
 
 func TestTypeParamsErrArgumentsParameters3(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:1: got 3 type arguments but func[T1, T2 interface{}](t1 T1, t2 T2) has 2 type parameters`, `
+	mixedErrorTest(t, `b.gop:2:1: got 3 type arguments but func[T1, T2 interface{}](t1 T1, t2 T2) has 2 type parameters`, `
 package main
 
 func Test[T1 any, T2 any](t1 T1, t2 T2) {
@@ -327,7 +364,7 @@ Test[int,int,int](1,2)
 }
 
 func TestTypeParamsErrCallArguments1(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:1: not enough arguments in call to Test
+	mixedErrorTest(t, `b.gop:2:1: not enough arguments in call to Test
 	have (untyped int)
 	want (T1, T2)`, `
 package main
@@ -341,7 +378,7 @@ Test(1)
 }
 
 func TestTypeParamsErrCallArguments2(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:1: too many arguments in call to Test
+	mixedErrorTest(t, `b.gop:2:1: too many arguments in call to Test
 	have (untyped int, untyped int, untyped int)
 	want (T1, T2)`, `
 package main
@@ -355,7 +392,7 @@ Test(1,2,3)
 }
 
 func TestTypeParamsErrCallArguments3(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:1: too many arguments in call to Test
+	mixedErrorTest(t, `b.gop:2:1: too many arguments in call to Test
 	have (untyped int, untyped int)
 	want ()`, `
 package main
@@ -371,7 +408,7 @@ Test(1,2)
 }
 
 func TestTypeParamsErrCallVariadicArguments1(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:1: not enough arguments in call to Add
+	mixedErrorTest(t, `b.gop:2:1: not enough arguments in call to Add
 	have ()
 	want (T1, ...T2)`, `
 package main
@@ -389,7 +426,7 @@ Add()
 }
 
 func TestTypeParamsErrCallVariadicArguments2(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:1: cannot infer T2 (./a.go:4:18)`, `
+	mixedErrorTest(t, `b.gop:2:1: cannot infer T2 (a.go:4:18)`, `
 package main
 
 func Add[T1 any, T2 ~int|~uint](v1 T1, v2 ...T2) (sum T2) {
@@ -405,7 +442,7 @@ Add(1)
 }
 
 func TestTypeParamsRecvTypeError1(t *testing.T) {
-	mixedErrorTest(t, `./a.go:7:9: cannot use generic type Data[T interface{}] without instantiation`, `
+	mixedErrorTest(t, `a.go:7:9: cannot use generic type Data[T interface{}] without instantiation`, `
 package main
 
 type Data[T any] struct {
@@ -419,7 +456,7 @@ Data[int]{}.Test()
 }
 
 func TestTypeParamsRecvTypeError2(t *testing.T) {
-	mixedErrorTest(t, `./a.go:7:9: got 2 arguments but 1 type parameters`, `
+	mixedErrorTest(t, `a.go:7:9: got 2 arguments but 1 type parameters`, `
 package main
 
 type Data[T any] struct {
@@ -433,7 +470,7 @@ Data[int]{}.Test()
 }
 
 func TestTypeParamsRecvTypeError3(t *testing.T) {
-	mixedErrorTest(t, `./a.go:8:9: got 1 type parameter, but receiver base type declares 2`, `
+	mixedErrorTest(t, `a.go:8:9: got 1 type parameter, but receiver base type declares 2`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -448,7 +485,7 @@ Data[int,int]{}.Test()
 }
 
 func TestGenericTypeWithoutInst1(t *testing.T) {
-	mixedErrorTest(t, `./a.go:8:9: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
+	mixedErrorTest(t, `a.go:8:9: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -463,7 +500,7 @@ var v Data[int,int]
 }
 
 func TestGenericTypeWithoutInst2(t *testing.T) {
-	mixedErrorTest(t, `./a.go:10:2: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
+	mixedErrorTest(t, `a.go:10:2: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -480,7 +517,7 @@ var v My[int]
 }
 
 func TestGenericTypeWithoutInst3(t *testing.T) {
-	mixedErrorTest(t, `./a.go:10:2: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
+	mixedErrorTest(t, `a.go:10:2: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -497,7 +534,7 @@ var v My
 }
 
 func TestGenericTypeWithoutInst4(t *testing.T) {
-	mixedErrorTest(t, `./a.go:10:15: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
+	mixedErrorTest(t, `a.go:10:15: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -514,7 +551,7 @@ var v My
 }
 
 func TestGenericTypeWithoutInst5(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:7: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
+	mixedErrorTest(t, `b.gop:2:7: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -527,7 +564,7 @@ var v Data
 }
 
 func TestGenericTypeWithoutInst6(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:8: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
+	mixedErrorTest(t, `b.gop:2:8: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -540,7 +577,7 @@ type T Data
 }
 
 func TestGenericTypeWithoutInst7(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:3:2: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
+	mixedErrorTest(t, `b.gop:3:2: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -555,7 +592,7 @@ type My struct {
 }
 
 func TestGenericTypeWithoutInst8(t *testing.T) {
-	mixedErrorTest(t, `./b.gop:2:23: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
+	mixedErrorTest(t, `b.gop:2:23: cannot use generic type Data[T1, T2 interface{}] without instantiation`, `
 package main
 
 type Data[T1 any, T2 any] struct {
@@ -564,6 +601,112 @@ type Data[T1 any, T2 any] struct {
 }
 `, `
 func test(v1 int, v2 *Data) {
+}
+`)
+}
+
+func TestGenericTypeCompositeLit(t *testing.T) {
+	gopMixedClTest(t, "main", `package main
+type A[T any] struct {
+	m T
+}
+
+type B[T any] struct {
+	n A[T]
+}
+
+`, `
+var a [2]int
+if 0 == a[1] {
+	println "world"
+}
+println B[int]{}.n
+if 0 < (B[int]{}).n.m {
+}
+`, `package main
+
+import "fmt"
+
+var a [2]int
+
+func main() {
+	if 0 == a[1] {
+		fmt.Println("world")
+	}
+	fmt.Println(B[int]{}.n)
+	if 0 < (B[int]{}).n.m {
+	}
+}
+`)
+}
+
+func TestInferFuncLambda(t *testing.T) {
+	gopMixedClTest(t, "main", `package main
+func ListMap[T any](ar []T, fn func(v T) T)[]T {
+	for i, v := range ar {
+		ar[i] = fn(v)
+	}
+	return ar
+}
+`, `
+println ListMap([1,2,3,4], x => x*x)
+ListMap [1,2,3,4], x => {
+	println x
+	return x
+}
+`, `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println(ListMap([]int{1, 2, 3, 4}, func(x int) int {
+		return x * x
+	}))
+	ListMap([]int{1, 2, 3, 4}, func(x int) int {
+		fmt.Println(x)
+		return x
+	})
+}
+`)
+}
+
+func TestInferOverloadFuncLambda(t *testing.T) {
+	gopMixedClTest(t, "main", `package main
+func ListMap__0[T any](ar []T, fn func(v T) T)[]T {
+	for i, v := range ar {
+		ar[i] = fn(v)
+	}
+	return ar
+}
+func ListMap__1(a string, fn func(s string)) {
+	for _, c := range a {
+		fn(string(c))
+	}
+}
+`, `
+println ListMap([1,2,3,4], x => x*x)
+ListMap [1,2,3,4], x => {
+	println x
+	return x
+}
+ListMap "hello", x => {
+	println x
+}
+`, `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println(ListMap__0([]int{1, 2, 3, 4}, func(x int) int {
+		return x * x
+	}))
+	ListMap__0([]int{1, 2, 3, 4}, func(x int) int {
+		fmt.Println(x)
+		return x
+	})
+	ListMap__1("hello", func(x string) {
+		fmt.Println(x)
+	})
 }
 `)
 }

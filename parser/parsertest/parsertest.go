@@ -84,6 +84,19 @@ func FprintNode(w io.Writer, lead string, v interface{}, prefix, indent string) 
 					FprintNode(w, fmt.Sprintf("%s%v:\n", prefix, sf.Name), sfv, prefix+indent, indent)
 				}
 			}
+			if m, ok := v.(*ast.MatrixLit); ok {
+				fmt.Fprintf(w, "%sNElt: %d\n", prefix, len(m.Elts))
+			}
+		} else if lit, ok := v.(*ast.StringLitEx); ok {
+			fmt.Fprintf(w, "%sExtra:\n", prefix)
+			prefix += indent
+			for _, part := range lit.Parts {
+				if val, ok := part.(string); ok {
+					fmt.Fprintf(w, "%s%v\n", prefix, val)
+				} else {
+					FprintNode(w, "", part, prefix, indent)
+				}
+			}
 		} else {
 			log.Panicln("FprintNode unexpected type:", t)
 		}
@@ -101,7 +114,7 @@ func Fprint(w io.Writer, pkg *ast.Package) {
 	for _, fpath := range paths {
 		fmt.Fprintf(w, "\nfile %s\n", filepath.Base(fpath))
 		file := pkg.Files[fpath]
-		if file.NoEntrypoint {
+		if file.HasShadowEntry() {
 			fmt.Fprintf(w, "noEntrypoint\n")
 		}
 		FprintNode(w, "", file.Decls, "", "  ")

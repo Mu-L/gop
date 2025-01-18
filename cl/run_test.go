@@ -12,8 +12,9 @@ import (
 	"testing"
 
 	"github.com/goplus/gop/cl"
+	"github.com/goplus/gop/cl/cltest"
 	"github.com/goplus/gop/parser"
-	"github.com/goplus/gop/parser/parsertest"
+	"github.com/goplus/gop/parser/fsx/memfs"
 	"github.com/goplus/gop/scanner"
 )
 
@@ -62,7 +63,7 @@ func getBytes(stdout, stderr io.Writer) (o iBytes, ok bool) {
 	return
 }
 
-func goRun(t *testing.T, code []byte) string {
+func goRun(_ *testing.T, code []byte) string {
 	idx := atomic.AddInt64(&tmpFileIdx, 1)
 	infile := tmpDir + strconv.FormatInt(idx, 10) + ".go"
 	err := os.WriteFile(infile, []byte(code), 0666)
@@ -83,8 +84,8 @@ func genGo(t *testing.T, conf *cl.Config, gopcode string) []byte {
 	cl.SetDisableRecover(true)
 	defer cl.SetDisableRecover(false)
 
-	fs := parsertest.NewSingleFileFS("/foo", "bar.gop", gopcode)
-	pkgs, err := parser.ParseFSDir(gblFset, fs, "/foo", parser.Config{Mode: parser.ParseComments})
+	fs := memfs.SingleFile("/foo", "bar.gop", gopcode)
+	pkgs, err := parser.ParseFSDir(cltest.Conf.Fset, fs, "/foo", parser.Config{Mode: parser.ParseComments})
 	if err != nil {
 		scanner.PrintError(os.Stderr, err)
 		t.Fatal("ParseFSDir:", err)
@@ -96,13 +97,13 @@ func genGo(t *testing.T, conf *cl.Config, gopcode string) []byte {
 	var b bytes.Buffer
 	err = pkg.WriteTo(&b)
 	if err != nil {
-		t.Fatal("gox.WriteTo failed:", err)
+		t.Fatal("gogen.WriteTo failed:", err)
 	}
 	return b.Bytes()
 }
 
 func testRun(t *testing.T, gopcode, expected string) {
-	code := genGo(t, gblConf, gopcode)
+	code := genGo(t, cltest.Conf, gopcode)
 	result := goRun(t, code)
 	if result != expected {
 		t.Fatalf("=> Result:\n%s\n=> Expected:\n%s\n", result, expected)
